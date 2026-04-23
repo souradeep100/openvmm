@@ -81,6 +81,8 @@ pub const SNP_REQUIRED_CPUID_LEAF_LIST_PARAVISOR: [SNP_REQUIRED_CPUID_LEAF; 35] 
     cpuid_leaf!(CpuidFunction::ExtendedStateEnumeration, 6),
     cpuid_leaf!(CpuidFunction::ExtendedStateEnumeration, 7),
     cpuid_leaf!(CpuidFunction::ExtendedStateEnumeration, 8),
+    cpuid_leaf!(CpuidFunction::ExtendedStateEnumeration, 11),
+    cpuid_leaf!(CpuidFunction::ExtendedStateEnumeration, 12),
     cpuid_leaf!(CpuidFunction::ExtendedBrandingString1, 0),
     cpuid_leaf!(CpuidFunction::ExtendedBrandingString2, 0),
     cpuid_leaf!(CpuidFunction::ExtendedBrandingString3, 0),
