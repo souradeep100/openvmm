@@ -56,9 +56,13 @@ impl MaxTraceLevel {
 
 #[derive(Serialize, Deserialize)]
 pub struct OpenvmmHclOutput {
+    #[serde(rename = "openvmm_hcl")]
     pub bin: PathBuf,
+    #[serde(rename = "openvmm_hcl.dbg")]
     pub dbg: Option<PathBuf>,
 }
+
+impl Artifact for OpenvmmHclOutput {}
 
 #[derive(Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 pub struct OpenvmmHclBuildParams {
@@ -84,7 +88,6 @@ impl FlowNode for Node {
     fn imports(ctx: &mut ImportCtx<'_>) {
         ctx.import::<crate::run_cargo_build::Node>();
         ctx.import::<crate::init_openvmm_magicpath_openhcl_sysroot::Node>();
-        ctx.import::<flowey_lib_common::install_dist_pkg::Node>();
     }
 
     fn emit(requests: Vec<Self::Request>, ctx: &mut NodeCtx<'_>) -> anyhow::Result<()> {
@@ -124,20 +127,7 @@ impl FlowNode for Node {
                 .reqv(|v| crate::init_openvmm_magicpath_openhcl_sysroot::Request { arch, path: v });
 
             // required due to ambient dependencies in openvmm_hcl's source code
-            pre_build_deps.push(openhcl_deps_path.clone().into_side_effect());
-
-            // TODO: install build tools for other platforms
-            if matches!(
-                ctx.platform(),
-                FlowPlatform::Linux(FlowPlatformLinuxDistro::Ubuntu)
-            ) {
-                pre_build_deps.push(ctx.reqv(|v| {
-                    flowey_lib_common::install_dist_pkg::Request::Install {
-                        package_names: vec!["build-essential".into()],
-                        done: v,
-                    }
-                }));
-            }
+            pre_build_deps.push(openhcl_deps_path.into_side_effect());
 
             let mut features = features
                 .into_iter()
@@ -150,6 +140,15 @@ impl FlowNode for Node {
                 .collect::<Vec<String>>();
 
             features.extend(max_trace_level.features());
+
+            // Forbid cc-rs from compiling anything for the openvmm_hcl build.
+            // Every C library it links comes prebuilt out of the openvmm-deps
+            // sdk sysroot, so a build script reaching for cc-rs is a bug.
+            let extra_env = Some(ReadVar::from_static(
+                [("CC_FORCE_DISABLE".to_string(), "1".to_string())]
+                    .into_iter()
+                    .collect(),
+            ));
 
             let output = ctx.reqv(|v| crate::run_cargo_build::Request {
                 crate_name: "openvmm_hcl".into(),
@@ -167,7 +166,7 @@ impl FlowNode for Node {
                 features: CargoFeatureSet::Specific(features),
                 target,
                 no_split_dbg_info,
-                extra_env: None,
+                extra_env,
                 pre_build_deps,
                 output: v,
             });

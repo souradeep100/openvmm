@@ -3,16 +3,10 @@
 
 //! MSHV hypervisor backend.
 
-#![cfg(all(
-    target_os = "linux",
-    feature = "virt_mshv",
-    guest_is_native,
-    guest_arch = "x86_64"
-))]
+#![cfg(all(target_os = "linux", feature = "virt_mshv", guest_is_native))]
 
 use hypervisor_resources::HypervisorKind;
 use hypervisor_resources::MshvHandle;
-use openvmm_core::hypervisor_backend::ResolvedHypervisorBackend;
 use vm_resource::IntoResource;
 use vm_resource::Resource;
 
@@ -43,19 +37,3 @@ impl hypervisor_resources::HypervisorProbe for MshvProbe {
         }))
     }
 }
-
-/// MSHV resource resolver.
-pub struct MshvResolver;
-
-impl vm_resource::ResolveResource<HypervisorKind, MshvHandle> for MshvResolver {
-    type Output = ResolvedHypervisorBackend;
-    type Error = std::convert::Infallible;
-
-    fn resolve(&self, resource: MshvHandle, _input: ()) -> Result<Self::Output, Self::Error> {
-        Ok(ResolvedHypervisorBackend::new(virt_mshv::LinuxMshv::from(
-            resource.mshv,
-        )))
-    }
-}
-
-vm_resource::declare_static_resolver!(MshvResolver, (HypervisorKind, MshvHandle),);

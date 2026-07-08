@@ -58,8 +58,25 @@ pub struct PlatformInfo {
     /// Whether the hypervisor supports GICv3. When `false`, only
     /// GICv2 is available (e.g., Raspberry Pi 5 with GIC-400).
     pub supports_gic_v3: bool,
+    /// Whether the hypervisor supports an in-kernel GICv3 ITS for
+    /// MSI delivery via LPIs. When `true`, the topology can include
+    /// a `GicItsInfo` and the backend will create/manage the ITS device.
+    pub supports_its: bool,
 }
 
+/// A hypervisor backend capable of creating partitions.
+///
+/// # Recognized features
+///
+/// The `recognizes_*` methods report whether the backend acts on an optional
+/// partition request rather than silently ignoring it: it either honors the
+/// request or fails partition creation with a specific error. They let the code
+/// assembling a [`ProtoPartitionConfig`] reject a request up front when the
+/// backend has no concept of it, instead of the request being quietly dropped.
+/// Recognition is *not* a promise that the request succeeds — the backend may
+/// still reject it in combination with another feature, or fail later during
+/// partition creation. Each method defaults to `false`, so a new optional
+/// feature is unrecognized everywhere until a backend overrides its method.
 pub trait Hypervisor: 'static {
     /// The prototype partition type.
     type ProtoPartition<'a>: ProtoPartition<Partition = Self::Partition>;
@@ -74,6 +91,13 @@ pub trait Hypervisor: 'static {
     /// information needed for topology construction and firmware table
     /// generation.
     fn platform_info(&self) -> PlatformInfo;
+
+    /// Whether the backend recognizes a request to expose hardware
+    /// virtualization (VMX/SVM) to the guest so it can run its own hypervisor.
+    /// See the [`Hypervisor`] trait docs on recognized features.
+    fn recognizes_nested_virt(&self) -> bool {
+        false
+    }
 
     /// Returns a new prototype partition from the given configuration.
     fn new_partition<'a>(
@@ -93,6 +117,8 @@ pub enum IsolationType {
     Snp,
     /// Trust domain extensions (Intel TDX) - hardware based isolation.
     Tdx,
+    /// Confidential Compute Architecture (ARM CCA) - hardware based isolation.
+    Cca,
 }
 
 impl IsolationType {
@@ -103,7 +129,7 @@ impl IsolationType {
 
     /// Returns whether the isolation type is hardware-backed.
     pub fn is_hardware_isolated(&self) -> bool {
-        matches!(self, Self::Snp | Self::Tdx)
+        matches!(self, Self::Snp | Self::Tdx | Self::Cca)
     }
 }
 
@@ -120,6 +146,7 @@ impl IsolationType {
             hvdef::HvPartitionIsolationType::VBS => Ok(IsolationType::Vbs),
             hvdef::HvPartitionIsolationType::SNP => Ok(IsolationType::Snp),
             hvdef::HvPartitionIsolationType::TDX => Ok(IsolationType::Tdx),
+            hvdef::HvPartitionIsolationType::CCA => Ok(IsolationType::Cca),
             _ => Err(UnexpectedIsolationType),
         }
     }
@@ -130,6 +157,7 @@ impl IsolationType {
             IsolationType::Vbs => hvdef::HvPartitionIsolationType::VBS,
             IsolationType::Snp => hvdef::HvPartitionIsolationType::SNP,
             IsolationType::Tdx => hvdef::HvPartitionIsolationType::TDX,
+            IsolationType::Cca => hvdef::HvPartitionIsolationType::CCA,
         }
     }
 }
@@ -153,6 +181,13 @@ pub struct ProtoPartitionConfig<'a> {
     pub vmtime: &'a VmTimeSource,
     /// Isolation type for this partition.
     pub isolation: IsolationType,
+    /// Expose hardware virtualization (VMX/SVM) to the guest so that it can run
+    /// its own hypervisor.
+    ///
+    /// The code assembling this config must only set this when the chosen
+    /// backend recognizes it via [`Hypervisor::recognizes_nested_virt`]; a
+    /// backend that receives an unrecognized request may silently ignore it.
+    pub nested_virt: bool,
 }
 
 /// Partition creation configuration.
@@ -652,11 +687,9 @@ pub trait Hv1 {
         &self,
     ) -> Option<&dyn DeviceBuilder<Device = Self::Device, Error = Self::Error>>;
 
-    /// Returns the partition's synic port access implementation.
-    ///
-    /// This is used by VMBus and other synic consumers to register message
-    /// and event ports for communication with the guest.
-    fn synic(&self) -> Arc<dyn vmcore::synic::SynicPortAccess>;
+    /// Returns the partition's synic port access, or an error if the
+    /// backend cannot support synic in its current configuration.
+    fn synic(&self) -> anyhow::Result<Arc<dyn vmcore::synic::SynicPortAccess>>;
 }
 
 pub trait DeviceBuilder: Hv1 {
@@ -680,7 +713,7 @@ impl MapVpciInterrupt for UnimplementedDevice {
 }
 
 impl SignalMsi for UnimplementedDevice {
-    fn signal_msi(&self, _rid: u32, _address: u64, _data: u32) {
+    fn signal_msi(&self, _devid: Option<u32>, _address: u64, _data: u32) {
         match *self {}
     }
 }

@@ -6,6 +6,9 @@
 // UNSAFETY: Manual memory management with mmap and vfio ioctls.
 #![expect(unsafe_code)]
 
+pub mod cdev;
+pub mod iommufd;
+
 use anyhow::Context;
 use bitfield_struct::bitfield;
 use headervec::HeaderVec;
@@ -20,6 +23,7 @@ use std::io::BufRead;
 use std::io::BufReader;
 use std::os::unix::prelude::*;
 use std::path::Path;
+use std::time::Duration;
 use vfio_bindings::bindings::vfio::VFIO_IRQ_SET_ACTION_TRIGGER;
 use vfio_bindings::bindings::vfio::VFIO_IRQ_SET_DATA_EVENTFD;
 use vfio_bindings::bindings::vfio::VFIO_IRQ_SET_DATA_NONE;
@@ -36,8 +40,20 @@ use vfio_bindings::bindings::vfio::vfio_region_sparse_mmap_area;
 
 /// Returns the host page size.
 pub fn host_page_size() -> u64 {
-    // SAFETY: sysconf(_SC_PAGESIZE) is always safe and always succeeds on Linux.
-    unsafe { libc::sysconf(libc::_SC_PAGESIZE) as u64 }
+    use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
+    static PAGE_SIZE: AtomicU64 = const { AtomicU64::new(0) };
+
+    let page_size = PAGE_SIZE.load(Relaxed);
+    if page_size == 0 {
+        // SAFETY: sysconf(_SC_PAGESIZE) is always safe to call on Linux.
+        let raw = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
+        assert!(raw > 0, "sysconf(_SC_PAGESIZE) failed: {raw}");
+        let page_size = raw as u64;
+        PAGE_SIZE.store(page_size, Relaxed);
+        page_size
+    } else {
+        page_size
+    }
 }
 
 mod ioctl {
@@ -147,24 +163,37 @@ impl Container {
     /// page-aligned.
     ///
     /// Only valid when the container uses a Type1v2 IOMMU.
-    pub fn map_dma(&self, iova: u64, vaddr: u64, size: u64) -> anyhow::Result<()> {
+    ///
+    /// # Safety
+    /// `vaddr` must point to valid, backed memory for `size` bytes. The
+    /// memory must not be unmapped while the IOMMU mapping is live (until
+    /// a corresponding `unmap_dma` call).
+    pub unsafe fn map_dma(
+        &self,
+        iova: u64,
+        vaddr: *const u8,
+        size: u64,
+        writable: bool,
+    ) -> anyhow::Result<()> {
         use vfio_bindings::bindings::vfio::VFIO_DMA_MAP_FLAG_READ;
         use vfio_bindings::bindings::vfio::VFIO_DMA_MAP_FLAG_WRITE;
 
-        // SAFETY: sysconf(_SC_PAGESIZE) is always safe and returns the
-        // host page size.
-        let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
-        anyhow::ensure!(page_size > 0, "sysconf(_SC_PAGESIZE) failed");
-        let page_size = page_size as u64;
+        let page_size = host_page_size();
         let page_mask = page_size - 1;
+        let vaddr = vaddr as u64;
         anyhow::ensure!(
             iova & page_mask == 0 && vaddr & page_mask == 0 && size & page_mask == 0,
             "VFIO DMA mapping requires page-aligned iova ({iova:#x}), vaddr ({vaddr:#x}), and size ({size:#x}), page size {page_size:#x}"
         );
 
+        let mut flags = VFIO_DMA_MAP_FLAG_READ;
+        if writable {
+            flags |= VFIO_DMA_MAP_FLAG_WRITE;
+        }
+
         let dma_map = vfio_bindings::bindings::vfio::vfio_iommu_type1_dma_map {
             argsz: size_of::<vfio_bindings::bindings::vfio::vfio_iommu_type1_dma_map>() as u32,
-            flags: VFIO_DMA_MAP_FLAG_READ | VFIO_DMA_MAP_FLAG_WRITE,
+            flags,
             vaddr,
             iova,
             size,
@@ -180,7 +209,11 @@ impl Container {
 
     /// Unmap a previously mapped IOVA range from the IOMMU.
     ///
-    /// `iova` and `size` must match a previous `map_dma` call.
+    /// For Type1v2, the unmap range must not bisect any previous mapping:
+    /// if a mapping exists at `iova`, it must start exactly at `iova`, and
+    /// if a mapping exists at `iova + size - 1`, it must end there.
+    /// Multiple mappings may be unmapped in one call as long as these
+    /// boundary conditions hold. Gaps within the range are fine.
     pub fn unmap_dma(&self, iova: u64, size: u64) -> anyhow::Result<()> {
         let mut dma_unmap = vfio_bindings::bindings::vfio::vfio_iommu_type1_dma_unmap {
             argsz: size_of::<vfio_bindings::bindings::vfio::vfio_iommu_type1_dma_unmap>() as u32,
@@ -193,14 +226,6 @@ impl Container {
         unsafe {
             ioctl::vfio_iommu_unmap_dma(self.file.as_raw_fd(), &mut dma_unmap)
                 .context("VFIO_IOMMU_UNMAP_DMA failed")?;
-        }
-        if dma_unmap.size != size {
-            tracing::warn!(
-                iova,
-                requested = size,
-                actual = dma_unmap.size,
-                "VFIO_IOMMU_UNMAP_DMA: unmapped size differs from requested"
-            );
         }
         Ok(())
     }
@@ -257,30 +282,12 @@ impl Group {
         Ok(group)
     }
 
-    pub async fn open_device(
-        &self,
-        device_id: &str,
-        driver: &(impl ?Sized + Driver),
-    ) -> anyhow::Result<Device> {
+    pub fn open_device(&self, device_id: &str) -> anyhow::Result<Device> {
         let id = CString::new(device_id)?;
         // SAFETY: The file descriptor is valid and the string is null-terminated.
         let file = unsafe {
-            let fd = ioctl::vfio_group_get_device_fd(self.file.as_raw_fd(), id.as_ptr());
-            // There is a small race window in the 6.1 kernel between when the
-            // vfio device is visible to userspace, and when it is added to its
-            // internal list. Try one more time on ENODEV failure after a brief
-            // sleep.
-            let fd = match fd {
-                Err(nix::errno::Errno::ENODEV) => {
-                    tracing::warn!(pci_id = device_id, "Retrying vfio open_device after delay");
-                    PolledTimer::new(driver)
-                        .sleep(std::time::Duration::from_millis(250))
-                        .await;
-                    ioctl::vfio_group_get_device_fd(self.file.as_raw_fd(), id.as_ptr())
-                }
-                _ => fd,
-            };
-            let fd = fd.with_context(|| format!("failed to get device fd for {device_id}"))?;
+            let fd = ioctl::vfio_group_get_device_fd(self.file.as_raw_fd(), id.as_ptr())
+                .with_context(|| format!("failed to get device fd for {device_id}"))?;
             File::from_raw_fd(fd)
         };
 
@@ -329,39 +336,69 @@ impl Group {
     /// Skip VFIO device reset when kernel is reloaded during servicing.
     /// This feature is non-upstream version of our kernel and will be
     /// eventually replaced with iommufd.
-    pub async fn set_keep_alive(
-        &self,
-        device_id: &str,
-        driver: &(impl ?Sized + Driver),
-    ) -> anyhow::Result<()> {
+    pub fn set_keep_alive(&self, device_id: &str) -> anyhow::Result<()> {
+        let id = CString::new(device_id)?;
         // SAFETY: The file descriptor is valid and a correctly constructed struct is being passed.
         unsafe {
-            let id = CString::new(device_id)?;
-            let r = ioctl::vfio_group_set_keep_alive(self.file.as_raw_fd(), id.as_ptr());
-            match r {
-                Ok(_) => Ok(()),
-                Err(nix::errno::Errno::ENODEV) => {
-                    // There is a small race window in the kernel between when the
-                    // vfio device is visible to userspace, and when it is added to its
-                    // internal list. Try one more time on ENODEV failure after a brief
-                    // sleep.
-                    tracing::warn!(
-                        pci_id = device_id,
-                        "vfio keepalive got ENODEV, retrying after delay"
+            ioctl::vfio_group_set_keep_alive(self.file.as_raw_fd(), id.as_ptr())
+                .with_context(|| format!("failed to set keep-alive for {device_id}"))?;
+        }
+        Ok(())
+    }
+}
+
+/// Retry wrapper for VFIO operations that may transiently fail
+pub struct VfioRetry<'a> {
+    driver: &'a dyn Driver,
+    device_id: &'a str,
+    sleep_duration: Duration,
+    max_retries: u32,
+}
+
+impl<'a> VfioRetry<'a> {
+    const SLEEP_DURATION: Duration = Duration::from_millis(250);
+    const MAX_RETRIES: u32 = 1;
+
+    pub fn new(driver: &'a dyn Driver, device_id: &'a str) -> Self {
+        Self {
+            driver,
+            device_id,
+            sleep_duration: Self::SLEEP_DURATION,
+            max_retries: Self::MAX_RETRIES,
+        }
+    }
+
+    /// Retry `op` when `should_retry` returns true for the error, up to
+    /// `max_retries` times with a sleep between attempts.
+    pub async fn retry<T, E>(
+        &self,
+        mut op: impl FnMut() -> Result<T, E>,
+        should_retry: impl Fn(&E) -> bool,
+        context: &str,
+    ) -> Result<T, E>
+    where
+        E: std::fmt::Display,
+    {
+        let mut attempt = 0;
+        loop {
+            match op() {
+                Ok(val) => return Ok(val),
+                Err(err) => {
+                    if attempt >= self.max_retries || !should_retry(&err) {
+                        return Err(err);
+                    }
+                    attempt += 1;
+                    tracelimit::warn_ratelimited!(
+                        device_id = self.device_id,
+                        operation = context,
+                        attempt,
+                        "retrying after transient error: {err}"
                     );
-                    PolledTimer::new(driver)
-                        .sleep(std::time::Duration::from_millis(250))
-                        .await;
-                    ioctl::vfio_group_set_keep_alive(self.file.as_raw_fd(), id.as_ptr())
-                        .with_context(|| {
-                            format!("failed to set keep-alive after delay for {device_id}")
-                        })
-                        .map(|_| ())
                 }
-                Err(_) => r
-                    .with_context(|| format!("failed to set keep-alive for {device_id}"))
-                    .map(|_| ()),
             }
+            PolledTimer::new(self.driver)
+                .sleep(self.sleep_duration)
+                .await;
         }
     }
 }
@@ -633,22 +670,23 @@ impl Device {
         Ok(())
     }
 
-    /// Disable (unmap) a contiguous range of previously mapped MSI-X vectors.
+    /// Disable MSI-X for this device, tearing down all eventfd bindings.
     ///
-    /// This issues VFIO_DEVICE_SET_IRQS with ACTION_TRIGGER + DATA_NONE and a
-    /// non-zero count, which per VFIO semantics removes the eventfd bindings
-    /// for the specified range starting at `start`.
-    pub fn unmap_msix(&self, start: u32, count: u32) -> anyhow::Result<()> {
-        if count == 0 {
-            return Ok(());
-        }
-
+    /// VFIO does not support disabling a subset of MSI-X vectors via DATA_NONE:
+    /// per `vfio_pci_set_msi_trigger` in the kernel, the only teardown form is
+    /// ACTION_TRIGGER | DATA_NONE with `count == 0`, which disables MSI-X
+    /// entirely. (A non-zero count with DATA_NONE is instead interpreted as a
+    /// loopback signal request that fires each vector's eventfd and unmaps
+    /// nothing.) This therefore always disables all vectors, and the caller
+    /// must only invoke it when MSI-X is currently enabled — otherwise the
+    /// kernel returns EINVAL.
+    pub fn unmap_msix(&self) -> anyhow::Result<()> {
         let header = vfio_irq_set {
             argsz: size_of::<vfio_irq_set>() as u32,
             flags: VFIO_IRQ_SET_ACTION_TRIGGER | VFIO_IRQ_SET_DATA_NONE,
             index: VFIO_PCI_MSIX_IRQ_INDEX,
-            start,
-            count,
+            start: 0,
+            count: 0,
             data: Default::default(),
         };
 

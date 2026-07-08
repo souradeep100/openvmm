@@ -8,7 +8,6 @@
 use anyhow::Context as _;
 use hypervisor_resources::HypervisorKind;
 use hypervisor_resources::KvmHandle;
-use openvmm_core::hypervisor_backend::ResolvedHypervisorBackend;
 use vm_resource::IntoResource;
 use vm_resource::Resource;
 
@@ -30,7 +29,7 @@ impl hypervisor_resources::HypervisorProbe for KvmProbe {
     }
 
     fn new_resource(&self, params: &[(&str, &str)]) -> anyhow::Result<Resource<HypervisorKind>> {
-        if let Some(&(key, _)) = params.first() {
+        if let Some(&(key, _val)) = params.first() {
             anyhow::bail!("unknown kvm parameter: {key}");
         }
         let kvm = open_kvm().context("KVM is not available")?;
@@ -44,20 +43,3 @@ fn open_kvm() -> std::io::Result<fs_err::File> {
         .write(true)
         .open("/dev/kvm")
 }
-
-/// KVM resource resolver.
-pub struct KvmResolver;
-
-impl vm_resource::ResolveResource<HypervisorKind, KvmHandle> for KvmResolver {
-    type Output = ResolvedHypervisorBackend;
-    type Error = virt_kvm::KvmError;
-
-    fn resolve(&self, resource: KvmHandle, _input: ()) -> Result<Self::Output, Self::Error> {
-        let kvm = resource.kvm;
-        Ok(ResolvedHypervisorBackend::new(virt_kvm::Kvm::from_kvm(
-            kvm,
-        )?))
-    }
-}
-
-vm_resource::declare_static_resolver!(KvmResolver, (HypervisorKind, KvmHandle),);
