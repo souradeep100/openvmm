@@ -622,7 +622,9 @@ impl Device {
         I: IntoIterator,
         I::Item: AsFd,
     {
-        const MAX_MSIX_VECTORS: usize = 256;
+        // Raised from 256 to support devices with large MSI-X tables
+        // (e.g. 513 vectors). Matches cloud-hypervisor's per-device limit.
+        const MAX_MSIX_VECTORS: usize = 2048;
 
         #[repr(C)]
         struct VfioIrqSetWithArray {

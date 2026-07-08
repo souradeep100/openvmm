@@ -106,6 +106,43 @@ impl virt::Hypervisor for LinuxMshv {
         )
         .map_err(|e| ErrorInner::SetPartitionProperty(e.into()))?;
 
+        // When a GICv2m MSI frame is configured, disable LPI support
+        // (GICD_TYPER.LPIS=0) so Linux routes PCIe MSIs through the v2m frame
+        // (SPI-based) instead of looking for an ITS. Mirrors the WHP backend.
+        let v2m_frame_base = match config.processor_topology.gic_msi() {
+            vm_topology::processor::aarch64::GicMsiController::V2m(v2m) => Some(v2m.frame_base),
+            _ => None,
+        };
+        let gic_lpi_int_id_bits = if v2m_frame_base.is_some() { 0u64 } else { 1u64 };
+        vmfd.set_partition_property(
+            HvPartitionPropertyCode::GicLpiIntIdBits.0,
+            gic_lpi_int_id_bits,
+        )
+        .map_err(|e| ErrorInner::SetPartitionProperty(e.into()))?;
+
+        // Register the GICv2m MSI frame base with the hypervisor as the MSI
+        // doorbell (GITS translater) base. Required for PCI passthrough: a real
+        // assigned device performs its MSI-X write via DMA to this guest
+        // physical doorbell, which only the hypervisor can trap and translate
+        // into a guest SPI (unlike emulated devices, whose MSI writes are
+        // trapped in software by as_signal_msi). Without this the hypervisor
+        // does not know the doorbell GPA, HVCALL_MAP_DEVICE_INTERRUPT cannot
+        // return a usable doorbell, and the device's MSI write lands nowhere
+        // (guest never receives the interrupt). Mirrors cloud-hypervisor
+        // create_vgic, which sets GITS_TRANSLATER_BASE_ADDRESS to the v2m frame.
+        //
+        // NOTE: the hypervisor shadows a ~64KiB region at this base, so the v2m
+        // frame base (DEFAULT_GIC_V2M_MSI_FRAME_BASE = 0xEFFC_0000) is chosen to
+        // sit clear of the emulated PL011 serial UARTs; see the constant's doc
+        // comment. Placing it adjacent to the UARTs silences the guest console.
+        if let Some(frame_base) = v2m_frame_base {
+            vmfd.set_partition_property(
+                HvPartitionPropertyCode::GitsTranslaterBaseAddress.0,
+                frame_base,
+            )
+            .map_err(|e| ErrorInner::SetPartitionProperty(e.into()))?;
+        }
+
         // Set the PMU PPI if the topology provides one.
         if let Some(pmu_gsiv) = config.processor_topology.pmu_gsiv() {
             vmfd.set_partition_property(
@@ -153,6 +190,10 @@ impl ProtoPartition for MshvProtoPartition<'_> {
             caps,
             synic_ports: Default::default(),
             time_frozen: false.into(),
+            gic_msi: self.config.processor_topology.gic_msi(),
+            gsi_states: parking_lot::Mutex::new(Box::new(
+                [crate::irqfd::GsiState::Unallocated; crate::irqfd::NUM_GSIS],
+            )),
         });
 
         let partition = MshvPartition {
@@ -197,6 +238,21 @@ impl virt::Partition for MshvPartition {
 
     fn request_msi(&self, _vtl: Vtl, request: MsiRequest) {
         self.inner.signal_msi(None, request.address, request.data);
+    }
+
+    fn as_signal_msi(&self, _vtl: Vtl) -> Option<Arc<dyn SignalMsi>> {
+        let v2m = match &self.inner.gic_msi {
+            vm_topology::processor::aarch64::GicMsiController::V2m(v2m) => v2m,
+            _ => return None,
+        };
+        let irqcon = self.inner.clone() as Arc<dyn virt::irqcon::ControlGic>;
+        Some(Arc::new(virt::aarch64::gic_v2m::GicV2mSignalMsi::new(
+            v2m, irqcon,
+        )))
+    }
+
+    fn irqfd(&self) -> Option<Arc<dyn virt::irqfd::IrqFd>> {
+        Some(Arc::new(crate::irqfd::MshvIrqFd::new(self.inner.clone())))
     }
 
     fn request_yield(&self, vp_index: VpIndex) {
