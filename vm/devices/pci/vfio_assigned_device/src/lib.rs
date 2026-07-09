@@ -568,10 +568,10 @@ impl VfioAssignedPciDevice {
         let msix = self.msix.as_ref().expect("msix must be present");
         let count = msix.vector_count;
 
-        // VFIO map_msix has a hard limit of 256 eventfds per call.
+        // VFIO map_msix has a hard limit of 2048 eventfds per call.
         anyhow::ensure!(
-            count <= 256,
-            "MSI-X vector count ({count}) exceeds VFIO limit of 256"
+            count <= 2048,
+            "MSI-X vector count ({count}) exceeds VFIO limit of 2048"
         );
 
         // Get an interrupt for each vector and trigger lazy irqfd route
