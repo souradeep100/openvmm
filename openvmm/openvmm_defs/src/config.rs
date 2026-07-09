@@ -75,19 +75,11 @@ pub const DEFAULT_GIC_REDISTRIBUTORS_BASE: u64 = if cfg!(target_os = "linux") {
     0xEFFE_E000
 };
 
-/// Base address of the GIC v2m MSI frame. Placed at the start of the reserved
-/// GIC MSI-controller region (same base as `DEFAULT_GIC_ITS_BASE`; the ITS and
-/// the v2m frame are mutually exclusive, so only one is ever instantiated).
+/// Base address of the GIC v2m MSI frame. Uses the Hyper-V convention address
+/// `0xEFF6_8000`, which sits below the ITS region, the PL011 UARTs, and the GIC
+/// dist/redist, and is clear of VMBus/chipset MMIO.
 ///
-/// IMPORTANT: on the MSHV root/arm64 backend this address is also registered
-/// with the hypervisor as `GITS_TRANSLATER_BASE_ADDRESS` so that a passthrough
-/// device's DMA MSI-X write to the doorbell is trapped and injected as a guest
-/// SPI. The hypervisor shadows a ~64KiB region at that base; it therefore must
-/// NOT sit adjacent to the OpenVMM-emulated PL011 serial UARTs
-/// (0xEFFE_B000 / 0xEFFE_C000), otherwise their MMIO is swallowed and the guest
-/// console goes silent. 0xEFFC_0000..0xEFFD_FFFF (the ITS region) is clear of
-/// the serials, dist/redist, and VMBus MMIO.
-pub const DEFAULT_GIC_V2M_MSI_FRAME_BASE: u64 = 0xEFFC_0000;
+pub const DEFAULT_GIC_V2M_MSI_FRAME_BASE: u64 = 0xEFF6_8000;
 /// Size of the v2m MSI frame (one 4KB page is the architectural minimum).
 pub const GIC_V2M_MSI_FRAME_SIZE: u64 = 0x1000;
 

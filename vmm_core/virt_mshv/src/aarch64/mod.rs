@@ -121,20 +121,7 @@ impl virt::Hypervisor for LinuxMshv {
         .map_err(|e| ErrorInner::SetPartitionProperty(e.into()))?;
 
         // Register the GICv2m MSI frame base with the hypervisor as the MSI
-        // doorbell (GITS translater) base. Required for PCI passthrough: a real
-        // assigned device performs its MSI-X write via DMA to this guest
-        // physical doorbell, which only the hypervisor can trap and translate
-        // into a guest SPI (unlike emulated devices, whose MSI writes are
-        // trapped in software by as_signal_msi). Without this the hypervisor
-        // does not know the doorbell GPA, HVCALL_MAP_DEVICE_INTERRUPT cannot
-        // return a usable doorbell, and the device's MSI write lands nowhere
-        // (guest never receives the interrupt). Mirrors cloud-hypervisor
-        // create_vgic, which sets GITS_TRANSLATER_BASE_ADDRESS to the v2m frame.
-        //
-        // NOTE: the hypervisor shadows a ~64KiB region at this base, so the v2m
-        // frame base (DEFAULT_GIC_V2M_MSI_FRAME_BASE = 0xEFFC_0000) is chosen to
-        // sit clear of the emulated PL011 serial UARTs; see the constant's doc
-        // comment. Placing it adjacent to the UARTs silences the guest console.
+        // doorbell (GITS translater) base.
         if let Some(frame_base) = v2m_frame_base {
             vmfd.set_partition_property(
                 HvPartitionPropertyCode::GitsTranslaterBaseAddress.0,

@@ -93,32 +93,22 @@ pub(super) struct SmmuSpiAllocation {
 /// will break.
 pub(super) fn resolve_spi_layout(input: &SpiLayoutInput) -> anyhow::Result<ResolvedSpiLayout> {
     let max_intid = input.gic_nr_irqs.saturating_sub(1).min(1019);
+    let mut spi = SpiAllocator::new(64..=max_intid);
 
     // --- Allocation order (do not reorder!) ---
 
-    // 1. GICv2m MSI block. These SPIs MUST be < 256: the MSHV root-partition
-    //    kernel derives the guest INTID for a passthrough MSI from the low 8
-    //    bits of the MSI data (drivers/hv/mshv_irq.c `mshv_copy_girq_info`:
-    //    lapic_vector = girq_irq_data & 0xFF). If the v2m SPIs were >= 256 the
-    //    guest INTID would be truncated and interrupts would be delivered to
-    //    the wrong (or no) SPI. Allocate the block from the low SPI range so
-    //    the guest INTID equals the MSI data, matching cloud-hypervisor (which
-    //    places its GICv2m frame at SPI base 128).
-    let mut low = SpiAllocator::new(64..=max_intid.min(255));
+    // 1. GICv2m MSI block.
     let v2m_spi_base = input
         .v2m_spi_count
-        .map(|count| low.alloc_block("gicv2m", count))
+        .map(|count| spi.alloc_block("gicv2m", count))
         .transpose()?;
 
-    // 2. SMMU instance SPIs (2 per instance: evtq + gerror). These are wired
-    //    interrupts (not MSI-data-derived), so they use the high SPI range,
-    //    allocated top-down from the highest INTID.
-    let mut high = SpiAllocator::new(max_intid.min(256)..=max_intid);
+    // 2. SMMU instance SPIs (2 per instance: evtq + gerror).
     let mut smmu = Vec::with_capacity(input.smmu_count);
     for idx in 0..input.smmu_count {
         smmu.push(SmmuSpiAllocation {
-            evtq_intid: high.alloc(&format!("smmu{idx}-evtq"))?,
-            gerr_intid: high.alloc(&format!("smmu{idx}-gerr"))?,
+            evtq_intid: spi.alloc(&format!("smmu{idx}-evtq"))?,
+            gerr_intid: spi.alloc(&format!("smmu{idx}-gerr"))?,
         });
     }
 
@@ -138,13 +128,11 @@ mod tests {
         })
         .unwrap();
 
-        // v2m block now allocated low (< 256) so guest INTID == MSI data.
-        assert_eq!(result.v2m_spi_base, Some(192));
-        // SMMU SPIs use the high range, top-down from max INTID.
-        assert_eq!(result.smmu[0].evtq_intid, 991);
-        assert_eq!(result.smmu[0].gerr_intid, 990);
-        assert_eq!(result.smmu[1].evtq_intid, 989);
-        assert_eq!(result.smmu[1].gerr_intid, 988);
+        assert_eq!(result.v2m_spi_base, Some(928));
+        assert_eq!(result.smmu[0].evtq_intid, 927);
+        assert_eq!(result.smmu[0].gerr_intid, 926);
+        assert_eq!(result.smmu[1].evtq_intid, 925);
+        assert_eq!(result.smmu[1].gerr_intid, 924);
     }
 
     #[test]
