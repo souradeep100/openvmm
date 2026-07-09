@@ -685,6 +685,7 @@ fn build_aarch64_topology(
     let gic_msi = if let Some(count) = v2m_spi_count {
         GicMsiController::V2m(GicV2mInfo {
             frame_base: openvmm_defs::config::DEFAULT_GIC_V2M_MSI_FRAME_BASE,
+            doorbell_base: openvmm_defs::config::DEFAULT_GIC_V2M_DOORBELL_BASE,
             spi_base: spi_layout
                 .v2m_spi_base
                 .expect("v2m base must be allocated when v2m_spi_count is Some"),

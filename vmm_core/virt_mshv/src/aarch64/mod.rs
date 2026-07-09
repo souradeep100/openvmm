@@ -109,23 +109,28 @@ impl virt::Hypervisor for LinuxMshv {
         // When a GICv2m MSI frame is configured, disable LPI support
         // (GICD_TYPER.LPIS=0) so Linux routes PCIe MSIs through the v2m frame
         // (SPI-based) instead of looking for an ITS. Mirrors the WHP backend.
-        let v2m_frame_base = match config.processor_topology.gic_msi() {
-            vm_topology::processor::aarch64::GicMsiController::V2m(v2m) => Some(v2m.frame_base),
+        let v2m_doorbell_base = match config.processor_topology.gic_msi() {
+            vm_topology::processor::aarch64::GicMsiController::V2m(v2m) => Some(v2m.doorbell_base),
             _ => None,
         };
-        let gic_lpi_int_id_bits = if v2m_frame_base.is_some() { 0u64 } else { 1u64 };
+        let gic_lpi_int_id_bits = if v2m_doorbell_base.is_some() {
+            0u64
+        } else {
+            1u64
+        };
         vmfd.set_partition_property(
             HvPartitionPropertyCode::GicLpiIntIdBits.0,
             gic_lpi_int_id_bits,
         )
         .map_err(|e| ErrorInner::SetPartitionProperty(e.into()))?;
 
-        // Register the GICv2m MSI frame base with the hypervisor as the MSI
-        // doorbell (GITS translater) base.
-        if let Some(frame_base) = v2m_frame_base {
+        // Register the v2m MSI doorbell base with the hypervisor as the
+        // GITS translater base, so an assigned device's DMA MSI-X write is
+        // trapped and injected as a guest SPI.
+        if let Some(doorbell_base) = v2m_doorbell_base {
             vmfd.set_partition_property(
                 HvPartitionPropertyCode::GitsTranslaterBaseAddress.0,
-                frame_base,
+                doorbell_base,
             )
             .map_err(|e| ErrorInner::SetPartitionProperty(e.into()))?;
         }
