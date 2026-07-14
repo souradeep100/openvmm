@@ -117,6 +117,63 @@ fn test_ttrpc_interface(
             mesh_rpc::client::UnixDialier::new(driver.clone(), ttrpc_path),
         );
 
+        let query_props = || {
+            client.call().start(
+                vmservice::Vm::PropertiesVm,
+                vmservice::PropertiesVmRequest { types: Vec::new() },
+            )
+        };
+
+        let caps = client
+            .call()
+            .start(vmservice::Vm::CapabilitiesVm, ())
+            .await
+            .unwrap();
+        assert!(
+            caps.supported_resources.iter().any(|r| r.resource
+                == vmservice::capabilities_vm_response::Resource::Scsi as i32
+                && r.add),
+            "SCSI add should be advertised as a supported resource"
+        );
+        assert!(
+            caps.supported_resources.iter().any(|r| r.resource
+                == vmservice::capabilities_vm_response::Resource::Vpci as i32
+                && r.add
+                && r.remove
+                && !r.update),
+            "vPCI add/remove should be advertised as supported"
+        );
+        assert_eq!(
+            caps.supported_guest_os,
+            vec![vmservice::capabilities_vm_response::SupportedGuestOs::Linux as i32],
+            "only Linux direct boot is supported"
+        );
+
+        let props = query_props().await.unwrap();
+        assert_eq!(
+            props.state,
+            vmservice::VmState::Uninitialized as i32,
+            "no VM created yet, expected UNINITIALIZED"
+        );
+
+        client
+            .call()
+            .start(
+                vmservice::Vm::CreateVm,
+                vmservice::CreateVmRequest {
+                    config: Some(vmservice::VmConfig::default()),
+                    log_id: String::new(),
+                },
+            )
+            .await
+            .unwrap_err();
+        let props = query_props().await.unwrap();
+        assert_eq!(
+            props.state,
+            vmservice::VmState::Uninitialized as i32,
+            "a failed CreateVm must leave state UNINITIALIZED"
+        );
+
         // Backing files for the PCIe storage devices created on iteration 0
         // (virtio-blk and an NVMe namespace). They are plain raw disks.
         let nvme_disk_path = tempdir.path().join("nvme.img");
@@ -286,6 +343,8 @@ fn test_ttrpc_interface(
                 )
             };
 
+            let guest_command = if i == 1 { "sleep 30" } else { "poweroff -f" };
+
             client
                 .call()
                 .start(
@@ -300,9 +359,9 @@ fn test_ttrpc_interface(
                                 vmservice::DirectBoot {
                                     kernel_path: kernel_path.get().to_string_lossy().to_string(),
                                     initrd_path: initrd_path.get().to_string_lossy().to_string(),
-                                    kernel_cmdline:
-                                        "console=ttyS0 rdinit=/bin/busybox panic=-1 -- poweroff -f"
-                                            .to_string(),
+                                    kernel_cmdline: format!(
+                                        "console=ttyS0 rdinit=/bin/busybox panic=-1 -- {guest_command}"
+                                    ),
                                 },
                             )),
                             serial_config: Some(vmservice::SerialConfig {
@@ -342,13 +401,18 @@ fn test_ttrpc_interface(
                 .await
                 .unwrap();
 
-            // Exercise the Consomme port-forwarding modify paths. Sending an
-            // invalid protocol value drives the request through the
-            // `ModifyResource(Update|Remove)` -> `consomme_rpc` wiring and the
-            // protocol validation in `parse_port_config`, returning an error
-            // before touching the device. This guards against regressions in
-            // the bind/unbind routing without depending on guest timing or
-            // host port availability.
+            let props = query_props().await.unwrap();
+            assert_eq!(
+                props.state,
+                vmservice::VmState::Paused as i32,
+                "VM should be PAUSED immediately after CreateVm"
+            );
+            assert!(
+                props.memory_stats.is_none() && props.processor_stats.is_none(),
+                "memory/processor stats should be unset, not zeroed"
+            );
+
+            // Invalid protocols exercise Consomme update/remove without binding a port.
             for modify_type in [vmservice::ModifyType::Update, vmservice::ModifyType::Remove] {
                 let err = client
                     .call()
@@ -367,7 +431,6 @@ fn test_ttrpc_interface(
                                                 ports: vec![vmservice::PortConfig {
                                                     host_port: 8080,
                                                     guest_port: 80,
-                                                    // Deliberately invalid protocol value.
                                                     protocol: 99,
                                                 }],
                                             },
@@ -473,7 +536,25 @@ fn test_ttrpc_interface(
                         .await
                         .unwrap();
 
+                    let props = query_props().await.unwrap();
+                    assert_eq!(
+                        props.state,
+                        vmservice::VmState::Running as i32,
+                        "after ResumeVm, expected RUNNING"
+                    );
+
                     waiter.await.unwrap();
+
+                    let props = query_props().await.unwrap();
+                    assert_eq!(
+                        props.state,
+                        vmservice::VmState::Halted as i32,
+                        "guest powered off, expected HALTED"
+                    );
+                    assert!(
+                        props.halt_reason.as_deref().is_some_and(|r| !r.is_empty()),
+                        "HALTED state should carry a halt_reason"
+                    );
 
                     if i == 0 {
                         client
@@ -481,6 +562,17 @@ fn test_ttrpc_interface(
                             .start(vmservice::Vm::TeardownVm, ())
                             .await
                             .unwrap();
+
+                        let props = query_props().await.unwrap();
+                        assert_eq!(
+                            props.state,
+                            vmservice::VmState::Uninitialized as i32,
+                            "after TeardownVm, expected UNINITIALIZED"
+                        );
+                        assert!(
+                            props.halt_reason.is_none(),
+                            "after TeardownVm, halt_reason should be cleared"
+                        );
 
                         client
                             .call()
@@ -492,6 +584,32 @@ fn test_ttrpc_interface(
                     }
                 }
                 1 => {
+                    client
+                        .call()
+                        .start(vmservice::Vm::ResumeVm, ())
+                        .await
+                        .unwrap();
+
+                    let props = query_props().await.unwrap();
+                    assert_eq!(
+                        props.state,
+                        vmservice::VmState::Running as i32,
+                        "after ResumeVm, expected RUNNING"
+                    );
+
+                    client
+                        .call()
+                        .start(vmservice::Vm::PauseVm, ())
+                        .await
+                        .unwrap();
+
+                    let props = query_props().await.unwrap();
+                    assert_eq!(
+                        props.state,
+                        vmservice::VmState::Paused as i32,
+                        "after PauseVm, expected PAUSED"
+                    );
+
                     client
                         .call()
                         .start(vmservice::Vm::TeardownVm, ())
