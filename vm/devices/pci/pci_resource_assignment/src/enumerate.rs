@@ -337,6 +337,14 @@ async fn probe_sriov(
     devfn: u8,
     preserve_bars: bool,
 ) -> Option<SriovProbeResult> {
+    // Full GB200 PF passthrough does not create guest VFs. Avoid reserving its
+    // large VF BAR windows while keeping the SR-IOV capability visible so the
+    // NVIDIA PF driver can query its PF/VF metadata.
+    let vendor_device = cfg.read_u32(bus, devfn, 0).await;
+    if vendor_device & 0xffff == 0x10de && vendor_device >> 16 == 0x2941 {
+        return None;
+    }
+
     // Walk extended capabilities starting at 0x100.
     let mut offset = EXT_CAP_START;
     loop {

@@ -1169,13 +1169,13 @@ live topology after switch downstream ports are enumerated.
 
 Examples:
     # The device behind switch downstream port sw1-downstream-0 is a generic
-    # initiator for NUMA node 1
-    --pcie-generic-initiator port=sw1-downstream-0,node=1
+    # initiator for NUMA node 1 with a coherent-memory aperture
+    --pcie-generic-initiator port=sw1-downstream-0,node=1,memory_base=0x8000000000,memory_length=0x2e41f00000
 
     # Also works for a root port name
     --pcie-generic-initiator port=rp0,node=2
 
-Syntax: port=<port_name>,node=<node>
+Syntax: port=<port_name>,node=<node>[,memory_base=<addr>,memory_length=<size>]
 "#)]
     #[clap(
         long = "pcie-generic-initiator",
@@ -3402,6 +3402,10 @@ pub struct PcieGenericInitiatorCli {
     pub port_name: String,
     /// NUMA node the device is a generic initiator for.
     pub node: u32,
+    /// Base GPA of the device's coherent-memory aperture.
+    pub memory_base: Option<u64>,
+    /// Length of the device's coherent-memory aperture.
+    pub memory_length: Option<u64>,
 }
 
 impl FromStr for PcieGenericInitiatorCli {
@@ -3410,6 +3414,8 @@ impl FromStr for PcieGenericInitiatorCli {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let mut port_name = None;
         let mut node = None;
+        let mut memory_base = None;
+        let mut memory_length = None;
 
         for opt in s.split(',') {
             let mut kv = opt.split('=');
@@ -3434,13 +3440,35 @@ impl FromStr for PcieGenericInitiatorCli {
                             .context("failed to parse generic initiator NUMA node")?,
                     );
                 }
+                "memory_base" => {
+                    let value = value.context("memory_base option requires a value")?;
+                    memory_base = Some(if value.starts_with("0x") || value.starts_with("0X") {
+                        parse_address(value).context("failed to parse coherent-memory base")?
+                    } else {
+                        u64::from_str(value).context("failed to parse coherent-memory base")?
+                    });
+                }
+                "memory_length" => {
+                    let value = value.context("memory_length option requires a value")?;
+                    memory_length = Some(if value.starts_with("0x") || value.starts_with("0X") {
+                        parse_address(value).context("failed to parse coherent-memory length")?
+                    } else {
+                        u64::from_str(value).context("failed to parse coherent-memory length")?
+                    });
+                }
                 _ => anyhow::bail!("unexpected option: '{opt}'"),
             }
+        }
+
+        if memory_base.is_some() != memory_length.is_some() {
+            anyhow::bail!("memory_base and memory_length must be specified together");
         }
 
         Ok(PcieGenericInitiatorCli {
             port_name: port_name.context("expected 'port=<name>'")?,
             node: node.context("expected 'node=<node>'")?,
+            memory_base,
+            memory_length,
         })
     }
 }
@@ -4989,6 +5017,8 @@ mod tests {
             PcieGenericInitiatorCli {
                 port_name: "rp0".to_string(),
                 node: 1,
+                memory_base: None,
+                memory_length: None,
             }
         );
 
@@ -4998,6 +5028,21 @@ mod tests {
             PcieGenericInitiatorCli {
                 port_name: "sw0-downstream-1".to_string(),
                 node: 2,
+                memory_base: None,
+                memory_length: None,
+            }
+        );
+
+        assert_eq!(
+            PcieGenericInitiatorCli::from_str(
+                "port=rp0,node=1,memory_base=0x8000000000,memory_length=198674743296"
+            )
+            .unwrap(),
+            PcieGenericInitiatorCli {
+                port_name: "rp0".to_string(),
+                node: 1,
+                memory_base: Some(0x8000000000),
+                memory_length: Some(198674743296),
             }
         );
 
@@ -5008,6 +5053,9 @@ mod tests {
         assert!(PcieGenericInitiatorCli::from_str("rp0=1").is_err());
         assert!(PcieGenericInitiatorCli::from_str("port=,node=1").is_err());
         assert!(PcieGenericInitiatorCli::from_str("port=rp0,node=x").is_err());
+        assert!(
+            PcieGenericInitiatorCli::from_str("port=rp0,node=1,memory_base=0x8000000000").is_err()
+        );
         assert!(PcieGenericInitiatorCli::from_str("port=rp0,node=1,extra").is_err());
     }
 
