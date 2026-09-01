@@ -799,6 +799,10 @@ impl VmService {
             floppy_disks: vec![],
             pcie_root_complexes,
             pcie_devices,
+            #[cfg(target_os = "linux")]
+            direct_iommus: vec![],
+            #[cfg(target_os = "linux")]
+            direct_assigned_devices: vec![],
             pcie_switches,
             pcie_generic_initiators: vec![],
             vpci_devices: vec![],

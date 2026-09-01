@@ -156,8 +156,31 @@ impl AsyncResolveResource<PciDeviceHandleKind, VfioCdevDeviceHandle> for VfioCde
             cdev,
             iommufd,
             iommu_id,
+            direct_iommu,
+            direct_ats_pasid,
             bar_pt,
         } = resource;
+
+        // Direct mode needs the VM fd owned by the hypervisor backend. Rust's
+        // `BorrowedFd` proves the fd is valid only for this call, so clone it
+        // into an owned `File` before sending it to the long-lived manager task.
+        let direct_vm_fd = if direct_iommu {
+            #[cfg(target_os = "linux")]
+            {
+                let vm_fd = input
+                    .direct_iommu_vm_fd
+                    .context("direct VFIO cdev attach requires a hypervisor backend VM fd")?
+                    .try_clone_to_owned()
+                    .context("failed to dup hypervisor VM fd for direct iommufd attach")?;
+                Some(std::fs::File::from(vm_fd))
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                anyhow::bail!("direct VFIO cdev attach is only supported on Linux")
+            }
+        } else {
+            None
+        };
 
         // The cdev/iommufd path currently attaches devices to an identity
         // IOAS; nested stage-1 translation is not yet wired up here. Match
@@ -167,12 +190,23 @@ impl AsyncResolveResource<PciDeviceHandleKind, VfioCdevDeviceHandle> for VfioCde
             pci_core::dma::DmaPassthrough::SoftwareBlocked => {
                 anyhow::bail!("VFIO device {pci_id} is behind a software IOMMU")
             }
-            pci_core::dma::DmaPassthrough::HardwareNestable(_) => {
+            // Without direct attach, a hardware-nestable device still needs
+            // nested translation support that this cdev path has not wired up.
+            pci_core::dma::DmaPassthrough::HardwareNestable(_) if !direct_iommu => {
                 anyhow::bail!("VFIO device {pci_id}: iommufd nested translation not yet supported")
             }
+            // Direct attach intentionally accepts a hardware-nestable device:
+            // the backend IOMMU driver handles the direct HWPT instead of an
+            // OpenVMM-managed nested S1 page table.
+            pci_core::dma::DmaPassthrough::HardwareNestable(_) => {}
         }
 
-        tracing::info!(pci_id, iommu_id, "opening VFIO cdev device with iommufd");
+        tracing::info!(
+            pci_id,
+            iommu_id,
+            direct = direct_iommu,
+            "opening VFIO cdev device with iommufd"
+        );
 
         let resp = self
             .client
@@ -181,6 +215,12 @@ impl AsyncResolveResource<PciDeviceHandleKind, VfioCdevDeviceHandle> for VfioCde
                 cdev,
                 iommufd,
                 iommu_id,
+                direct_vm_fd,
+                direct_hwpt_flags: if direct_ats_pasid {
+                    vfio_sys::iommufd::IOMMU_HWPT_DIRECT_FLAG_ATS_PASID
+                } else {
+                    0
+                },
             })
             .await
             .context("VFIO cdev manager failed")?;

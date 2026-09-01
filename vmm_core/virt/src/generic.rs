@@ -27,6 +27,8 @@ use std::convert::Infallible;
 use std::fmt::Debug;
 use std::future::Future;
 use std::future::poll_fn;
+#[cfg(target_os = "linux")]
+use std::os::fd::BorrowedFd;
 use std::pin::pin;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
@@ -397,6 +399,16 @@ pub trait Partition: 'static + Hv1 + Inspect + Send + Sync {
     ///
     /// Not all partitions support this.
     fn irqfd(&self) -> Option<Arc<dyn IrqFd>> {
+        None
+    }
+
+    /// Returns the backend VM fd for direct iommufd attach, if supported.
+    ///
+    /// The default is `None` so hypervisors opt in explicitly. This keeps
+    /// direct attach from accidentally treating an unsupported backend as a
+    /// Linux VM fd provider.
+    #[cfg(target_os = "linux")]
+    fn direct_iommu_vm_fd(&self) -> Option<BorrowedFd<'_>> {
         None
     }
 

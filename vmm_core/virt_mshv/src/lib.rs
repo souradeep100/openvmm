@@ -409,6 +409,93 @@ impl MshvPartitionInner {
     }
 }
 
+/// Computes the Hyper-V logical device ID for a direct-attached PCI device.
+///
+/// This matches the encoding the root partition's Hyper-V IOMMU driver uses
+/// for direct-attached devices, so that a device attached by the kernel can be
+/// named by the VMM in [`MshvPartition::set_device_virtual_iommu`].
+pub fn logical_device_id(segment: u16, bus: u8, device: u8, function: u8) -> u64 {
+    ((segment as u64) << 16)
+        | ((bus as u64) << 8)
+        | (((device & 0x1f) as u64) << 3)
+        | ((function & 0x7) as u64)
+}
+
+/// Virtual IOMMU support for assigned-device passthrough.
+///
+/// On ARM64 the hypervisor emulates the guest-visible SMMUv3: it intercepts
+/// the vSMMU MMIO window, processes the guest command queue and shadows the
+/// guest stream table onto the physical SMMU. The VMM therefore creates the
+/// virtual IOMMU and binds assigned devices into it by StreamID, but must not
+/// emulate the MMIO window itself.
+impl MshvPartition {
+    /// Creates a virtual IOMMU in this partition.
+    ///
+    /// `base_gpa_page` is the guest page number at which the vSMMU register
+    /// window is presented. `feature_set` is either the caller-supplied generic
+    /// IDR0-IDR5 image or a physical-IOMMU capability mirror.
+    pub fn create_virtual_iommu(
+        &self,
+        virt_iommu_id: u32,
+        base_gpa_page: u64,
+        interrupts: hvdef::hypercall::VirtIommuInterrupts,
+        feature_set: hvdef::hypercall::VirtIommuFeatureSet,
+    ) -> Result<(), MshvError> {
+        use mshv_bindings::mshv_root_hvcall;
+
+        let input = hvdef::hypercall::CreateVirtualIommu {
+            partition_id: 0,
+            virt_iommu_id,
+            interrupts,
+            reserved: 0,
+            base_gpa_page,
+            feature_set,
+        };
+        let mut args = mshv_root_hvcall {
+            code: hvdef::HypercallCode::HvCallCreateVirtualIommu.0,
+            in_sz: size_of::<hvdef::hypercall::CreateVirtualIommu>() as u16,
+            in_ptr: std::ptr::addr_of!(input) as u64,
+            ..Default::default()
+        };
+        self.inner.vmfd.hvcall(&mut args)
+    }
+
+    /// Binds or unbinds an assigned device to a virtual IOMMU at `stream_id`.
+    ///
+    /// `stream_id` is the guest-visible StreamID (vSID) and must match the
+    /// device's ID mapping in the guest's IORT SMMUv3 node.
+    pub fn set_device_virtual_iommu(
+        &self,
+        logical_device_id: u64,
+        virt_iommu_id: u32,
+        stream_id: u32,
+        enabled: bool,
+    ) -> Result<(), MshvError> {
+        use mshv_bindings::mshv_root_hvcall;
+
+        let input = hvdef::hypercall::SetLogicalDeviceProperty {
+            partition_id: 0,
+            logical_device_id,
+            property_code: hvdef::hypercall::HV_LOGICAL_DEVICE_PROPERTY_VIRTUAL_IOMMU,
+            reserved: 0,
+            property_value: hvdef::hypercall::LogicalDevicePropertyVirtualIommu {
+                flags: enabled as u64,
+                virt_iommu_id,
+                stream_id,
+            },
+            property_value_padding: [0; 16],
+        };
+
+        let mut args = mshv_root_hvcall {
+            code: hvdef::HypercallCode::HvCallSetLogicalDeviceProperty.0,
+            in_sz: size_of::<hvdef::hypercall::SetLogicalDeviceProperty>() as u16,
+            in_ptr: std::ptr::addr_of!(input) as u64,
+            ..Default::default()
+        };
+        self.inner.vmfd.hvcall(&mut args)
+    }
+}
+
 /// Binds a virtual processor to the current thread.
 pub struct MshvProcessorBinder {
     partition: Arc<MshvPartitionInner>,

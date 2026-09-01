@@ -571,7 +571,7 @@ options:
 
     /// configure SMMUv3 IOMMU for an aarch64 PCIe root complex (repeatable).
     ///
-    /// Syntax: `rc=<name>[,accel][,oas=auto|N]`.
+    /// Syntax: `rc=<name>[,accel][,ats][,ssid-bits=N][,oas=auto|N]`.
     #[cfg(guest_arch = "aarch64")]
     #[clap(long, value_name = "SMMU_CONFIG")]
     pub smmu: Vec<SmmuCli>,
@@ -1249,6 +1249,27 @@ Syntax: id=<name>
     #[cfg(target_os = "linux")]
     #[clap(long, conflicts_with("pcat"))]
     pub iommu: Vec<IommuCli>,
+
+    /// Enable direct VIOMMU/VDEVICE/HWPT attach for an iommufd context
+    #[clap(long_help = r#"
+Enable direct VIOMMU/VDEVICE/HWPT attach for a declared --iommu context.
+
+This only applies to VFIO cdev devices that reference the same iommufd context
+with --vfio ...,iommu=<id>. Legacy VFIO group/container devices are unaffected.
+
+Requires a hypervisor backend that can provide a VM fd (KVM or MSHV) and a
+kernel with the direct iommufd UAPI.
+
+Examples:
+    --iommu id=iommu0 --direct-iommu iommu=iommu0 \
+      --smmu rc=rc0,accel,ats,ssid-bits=14 \
+      --vfio host=0008:06:00.0,port=rp0,iommu=iommu0
+
+Syntax: iommu=<name>
+"#)]
+    #[cfg(target_os = "linux")]
+    #[clap(long, conflicts_with("pcat"))]
+    pub direct_iommu: Vec<DirectIommuCli>,
 }
 
 impl Options {
@@ -3627,14 +3648,19 @@ impl FromStr for VfioDeviceCli {
 
 /// CLI configuration for an SMMUv3 instance.
 ///
-/// Syntax: `rc=<name>[,accel][,oas=auto|N]`. `oas` defaults to `auto`.
+/// Syntax: `rc=<name>[,accel][,ats][,ssid-bits=N][,oas=auto|N]`.
+/// ATS is off and `ssid-bits` is zero by default.
 #[cfg(guest_arch = "aarch64")]
 #[derive(Clone, Debug)]
 pub struct SmmuCli {
     /// Name of the PCIe root complex this SMMU covers.
     pub rc_name: String,
-    /// Enable HW-accelerated nested translation (iommufd).
+    /// Use the Hyper-V-owned guest SMMUv3 path.
     pub accel: bool,
+    /// Advertise and enable ATS/PASID for DIRECT devices.
+    pub ats: bool,
+    /// SMMUv3 substream/PASID width.
+    pub ssid_bits: u8,
     /// Output address size policy.
     pub oas: SmmuOasCli,
 }
@@ -3657,6 +3683,8 @@ impl FromStr for SmmuCli {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let mut rc_name: Option<String> = None;
         let mut accel = false;
+        let mut ats = false;
+        let mut ssid_bits: Option<u8> = None;
         let mut oas = SmmuOasCli::Auto;
 
         for part in s.split(',') {
@@ -3670,6 +3698,14 @@ impl FromStr for SmmuCli {
                             anyhow::bail!("--smmu: 'rc=' value cannot be empty");
                         }
                         rc_name = Some(value.to_string());
+                    }
+                    "ssid-bits" => {
+                        anyhow::ensure!(ssid_bits.is_none(), "duplicate --smmu key: 'ssid-bits'");
+                        let bits: u8 = value
+                            .parse()
+                            .context("--smmu: ssid-bits must be a number")?;
+                        anyhow::ensure!(bits <= 20, "--smmu: ssid-bits must be between 0 and 20");
+                        ssid_bits = Some(bits);
                     }
                     "oas" => {
                         oas = if value == "auto" {
@@ -3686,17 +3722,27 @@ impl FromStr for SmmuCli {
             } else {
                 // Boolean flag (no '=')
                 match part {
-                    "accel" => accel = true,
+                    "accel" if !accel => accel = true,
+                    "ats" if !ats => ats = true,
+                    "accel" | "ats" => anyhow::bail!("duplicate --smmu flag: '{part}'"),
                     _ => anyhow::bail!("unknown --smmu flag: '{part}'"),
                 }
             }
         }
 
         let rc_name = rc_name.context("--smmu: 'rc=' is required")?;
+        let ssid_bits = ssid_bits.unwrap_or(0);
+        anyhow::ensure!(!ats || accel, "--smmu: ats requires accel");
+        anyhow::ensure!(
+            !ats || ssid_bits != 0,
+            "--smmu: ats requires nonzero ssid-bits"
+        );
 
         Ok(SmmuCli {
             rc_name,
             accel,
+            ats,
+            ssid_bits,
             oas,
         })
     }
@@ -3728,6 +3774,36 @@ impl FromStr for IommuCli {
         }
         Ok(IommuCli {
             id: value.to_string(),
+        })
+    }
+}
+
+/// CLI configuration for a direct iommufd context.
+///
+/// Syntax: `iommu=<name>`
+#[cfg(target_os = "linux")]
+#[derive(Clone, Debug)]
+pub struct DirectIommuCli {
+    /// The `--iommu id=<name>` context to run in direct mode.
+    pub iommu_id: String,
+}
+
+#[cfg(target_os = "linux")]
+impl FromStr for DirectIommuCli {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let (key, value) = s
+            .split_once('=')
+            .context("expected iommu=<name> (e.g., iommu=iommu0)")?;
+        if key != "iommu" {
+            anyhow::bail!("expected 'iommu=<name>', got '{key}=...'");
+        }
+        if value.is_empty() {
+            anyhow::bail!("direct iommu id cannot be empty");
+        }
+        Ok(DirectIommuCli {
+            iommu_id: value.to_string(),
         })
     }
 }
@@ -5494,6 +5570,22 @@ mod tests {
         assert!(IommuCli::from_str("id=").is_err());
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_direct_iommu_cli_parse() {
+        let c = DirectIommuCli::from_str("iommu=iommu0").unwrap();
+        assert_eq!(c.iommu_id, "iommu0");
+
+        // Wrong key.
+        assert!(DirectIommuCli::from_str("id=iommu0").is_err());
+
+        // Missing '=' separator.
+        assert!(DirectIommuCli::from_str("iommu0").is_err());
+
+        // Empty id.
+        assert!(DirectIommuCli::from_str("iommu=").is_err());
+    }
+
     #[test]
     fn test_nvme_controller_cli_pcie() {
         let c = NvmeControllerCli::from_str("id=nvme0,pcie_port=p0").unwrap();
@@ -5799,13 +5891,23 @@ mod tests {
         let s = SmmuCli::from_str("rc=pcie0").unwrap();
         assert_eq!(s.rc_name, "pcie0");
         assert!(!s.accel);
+        assert!(!s.ats);
+        assert_eq!(s.ssid_bits, 0);
         assert!(matches!(s.oas, SmmuOasCli::Auto));
 
         // accel flag.
         let s = SmmuCli::from_str("rc=pcie0,accel").unwrap();
         assert_eq!(s.rc_name, "pcie0");
         assert!(s.accel);
+        assert!(!s.ats);
+        assert_eq!(s.ssid_bits, 0);
         assert!(matches!(s.oas, SmmuOasCli::Auto));
+
+        // ATS/PASID is explicit and requires accelerated mode plus SSID width.
+        let s = SmmuCli::from_str("rc=pcie0,accel,ats,ssid-bits=14").unwrap();
+        assert!(s.accel);
+        assert!(s.ats);
+        assert_eq!(s.ssid_bits, 14);
 
         // Explicit oas=auto.
         let s = SmmuCli::from_str("rc=pcie0,oas=auto").unwrap();
@@ -5833,6 +5935,12 @@ mod tests {
 
         // Non-numeric oas value.
         assert!(SmmuCli::from_str("rc=pcie0,oas=big").is_err());
+
+        // Invalid ATS/PASID combinations.
+        assert!(SmmuCli::from_str("rc=pcie0,ats,ssid-bits=14").is_err());
+        assert!(SmmuCli::from_str("rc=pcie0,accel,ats").is_err());
+        assert!(SmmuCli::from_str("rc=pcie0,accel,ats,ssid-bits=0").is_err());
+        assert!(SmmuCli::from_str("rc=pcie0,accel,ssid-bits=21").is_err());
 
         // Unknown key.
         assert!(SmmuCli::from_str("rc=pcie0,foo=bar").is_err());

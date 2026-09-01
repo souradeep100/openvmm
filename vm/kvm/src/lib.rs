@@ -581,6 +581,14 @@ pub struct Partition {
 }
 
 impl Partition {
+    /// Borrow the KVM VM fd without transferring ownership to the caller.
+    ///
+    /// This is analogous to handing out a borrowed `int fd` in C, except Rust
+    /// ties the returned fd lifetime to `&self`.
+    pub fn vm_fd(&self) -> BorrowedFd<'_> {
+        self.vm.as_fd()
+    }
+
     #[cfg(target_arch = "x86_64")]
     pub fn check_sev_snp_launch_extensions(&self) -> Result<()> {
         // SAFETY: This is the documented KVM_MEMORY_ENCRYPT_OP availability

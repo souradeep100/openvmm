@@ -148,6 +148,10 @@ async fn boot_no_vmbus_pcie_aarch64_tcg(
                         cdev,
                         iommufd,
                         iommu_id: "iommu0".into(),
+                        // These tests cover the regular cdev/IOAS path; direct
+                        // attach has different kernel object lifetime rules.
+                        direct_iommu: false,
+                        direct_ats_pasid: false,
                         bar_pt: [false; 6],
                     }
                     .into_resource(),
@@ -309,6 +313,10 @@ async fn assigned_device_peer_to_peer_dma_aarch64_tcg(
                         cdev: edu_cdev,
                         iommufd,
                         iommu_id: "iommu0".into(),
+                        // Keep this peer-to-peer test on the IOAS path so the
+                        // existing DMA mapping expectations remain unchanged.
+                        direct_iommu: false,
+                        direct_ats_pasid: false,
                         bar_pt: [false; 6],
                     }
                     .into_resource(),
@@ -320,6 +328,10 @@ async fn assigned_device_peer_to_peer_dma_aarch64_tcg(
                         cdev: ivshmem_cdev,
                         iommufd: iommufd2,
                         iommu_id: "iommu0".into(),
+                        // The second device shares the same IOAS context; do
+                        // not switch it to direct attach in this test.
+                        direct_iommu: false,
+                        direct_ats_pasid: false,
                         bar_pt: [false; 6],
                     }
                     .into_resource(),

@@ -42,6 +42,12 @@ pub struct AcpiSmmuConfig {
     pub event_gsiv: u32,
     /// GIC SPI INTID for the global error interrupt.
     pub gerr_gsiv: u32,
+    /// Whether the PCI root complex may enable ATS.
+    pub ats_supported: bool,
+    /// Guest requester IDs of DIRECT devices bound to this SMMU.
+    pub device_stream_ids: Vec<u32>,
+    /// Physical MSI doorbell window, as `(base, length)`, to identity-map.
+    pub msi_window: Option<(u64, u64)>,
 }
 
 /// Binary ACPI tables constructed by [`AcpiTablesBuilder`].
@@ -668,7 +674,12 @@ impl<T: AcpiTopology> AcpiTablesBuilder<'_, T> {
         };
         let its_node_count: u32 = if has_its { 1 } else { 0 };
         let smmu_node_count = smmu_configs.len() as u32;
-        let node_count = its_node_count + smmu_node_count + self.pcie_host_bridges.len() as u32;
+        let rmr_node_count = smmu_configs
+            .iter()
+            .filter(|cfg| cfg.msi_window.is_some() && !cfg.device_stream_ids.is_empty())
+            .count() as u32;
+        let node_count =
+            its_node_count + smmu_node_count + self.pcie_host_bridges.len() as u32 + rmr_node_count;
 
         let mut iort_extra: Vec<u8> = Vec::new();
 
@@ -766,7 +777,16 @@ impl<T: AcpiTopology> AcpiTablesBuilder<'_, T> {
                 (0, 0, false)
             };
 
-            let rc = iort::IortPciRootComplex::new(bridge.index, bridge.segment, rc_mapping_count);
+            let ats_supported = smmu_configs
+                .iter()
+                .find(|cfg| cfg.rc_index == bridge.index)
+                .is_some_and(|cfg| cfg.ats_supported);
+            let rc = iort::IortPciRootComplex::new(
+                bridge.index,
+                bridge.segment,
+                rc_mapping_count,
+                ats_supported,
+            );
             iort_extra.extend_from_slice(rc.as_bytes());
 
             if rc_mapping_count > 0 {
@@ -792,6 +812,56 @@ impl<T: AcpiTopology> AcpiTablesBuilder<'_, T> {
                     .as_bytes(),
                 );
             }
+        }
+
+        // DIRECT devices write the Hyper-V physical MSI doorbell, not the
+        // guest-visible emulated v2m address. Publish one identity-only RMR per
+        // accelerated root complex and map every bound guest requester ID.
+        for cfg in smmu_configs {
+            let Some((msi_base, msi_len)) = cfg.msi_window else {
+                continue;
+            };
+            if cfg.device_stream_ids.is_empty() {
+                continue;
+            }
+            let Some((_, smmu_offset)) =
+                smmu_rc_offsets.iter().find(|(idx, _)| *idx == cfg.rc_index)
+            else {
+                continue;
+            };
+
+            const RMR_ALIGN: u64 = 0x1_0000;
+            let aligned_base = msi_base & !(RMR_ALIGN - 1);
+            let aligned_len = (msi_base + msi_len).next_multiple_of(RMR_ALIGN) - aligned_base;
+            let mapping_count: u32 = cfg
+                .device_stream_ids
+                .len()
+                .try_into()
+                .expect("too many DIRECT devices for IORT RMR");
+            iort_extra.extend_from_slice(
+                iort::IortRmr::new(
+                    cfg.rc_index,
+                    iort::IORT_RMR_ACCESS_PRIVILEGE,
+                    1,
+                    mapping_count,
+                )
+                .as_bytes(),
+            );
+            for &stream_id in &cfg.device_stream_ids {
+                iort_extra.extend_from_slice(
+                    iort::IortIdMapping::new(
+                        stream_id,
+                        0,
+                        stream_id,
+                        *smmu_offset,
+                        iort::IORT_ID_SINGLE_MAPPING,
+                    )
+                    .as_bytes(),
+                );
+            }
+            iort_extra.extend_from_slice(
+                iort::IortRmrDescriptor::new(aligned_base, aligned_len).as_bytes(),
+            );
         }
 
         (f)(&acpi::builder::Table::new_dyn(
@@ -1787,6 +1857,9 @@ mod test {
                     base: smmu_base,
                     event_gsiv: 35,
                     gerr_gsiv: 36,
+                    ats_supported: false,
+                    device_stream_ids: Vec::new(),
+                    msi_window: None,
                 }],
             },
         }
@@ -2006,6 +2079,71 @@ mod test {
         assert_eq!(data[rc_node], iort::IORT_NODE_TYPE_PCI_ROOT_COMPLEX);
         let rc_mapping = rc_node + 36;
         assert_eq!(u32_at(&data, rc_mapping + 12), iort::IORT_NODE_OFFSET); // → ITS group
+    }
+
+    #[test]
+    fn test_iort_direct_smmu_ats_identity_and_msi_rmr() {
+        use acpi_spec::iort;
+
+        let mem = new_mem();
+        let topology = new_aarch64_its_topology();
+        let pcie_host_bridges = vec![PcieHostBridge {
+            index: 0,
+            segment: 0,
+            start_bus: 0,
+            end_bus: 255,
+            ecam_range: MemoryRange::new(0..256 * 256 * 4096),
+            low_mmio: MemoryRange::new(0xdc000000..0xe0000000),
+            high_mmio: MemoryRange::new(0x1000000000..0x1040000000),
+            cxl: None,
+            vnode: None,
+            preserve_bars: false,
+            preserve_boot_config: true,
+        }];
+        let mut builder =
+            new_aarch64_builder_with_smmu(&mem, &topology, &pcie_host_bridges, 0xEFFA_0000);
+        let AcpiArchConfig::Aarch64 { smmu, .. } = &mut builder.arch else {
+            unreachable!();
+        };
+        smmu[0].ats_supported = true;
+        smmu[0].device_stream_ids = vec![0x100, 0x200];
+        smmu[0].msi_window = Some((0xEFF6_8000, 0x1_0000));
+
+        let data = builder.build_iort().unwrap();
+        let mut nodes = Vec::new();
+        let mut offset = iort::IORT_NODE_OFFSET as usize;
+        for _ in 0..u32_at(&data, 36) {
+            nodes.push(offset);
+            offset += u16_at(&data, offset + 1) as usize;
+        }
+
+        let rc = *nodes
+            .iter()
+            .find(|&&offset| data[offset] == iort::IORT_NODE_TYPE_PCI_ROOT_COMPLEX)
+            .unwrap();
+        assert_eq!(u32_at(&data, rc + 24), iort::IORT_ATS_SUPPORTED);
+        let rc_mapping = rc + u32_at(&data, rc + 12) as usize;
+        assert_eq!(u32_at(&data, rc_mapping), 0);
+        assert_eq!(u32_at(&data, rc_mapping + 4), 0xFFFF);
+        assert_eq!(u32_at(&data, rc_mapping + 8), 0);
+
+        let rmr = *nodes
+            .iter()
+            .find(|&&offset| data[offset] == iort::IORT_NODE_TYPE_RMR)
+            .unwrap();
+        assert_eq!(u32_at(&data, rmr + 8), 2);
+        assert_eq!(u32_at(&data, rmr + 16), iort::IORT_RMR_ACCESS_PRIVILEGE);
+        assert_eq!(u32_at(&data, rmr + 20), 1);
+        let mapping = rmr + u32_at(&data, rmr + 12) as usize;
+        for (index, stream_id) in [0x100, 0x200].into_iter().enumerate() {
+            let mapping = mapping + index * 20;
+            assert_eq!(u32_at(&data, mapping), stream_id);
+            assert_eq!(u32_at(&data, mapping + 8), stream_id);
+            assert_eq!(u32_at(&data, mapping + 16), iort::IORT_ID_SINGLE_MAPPING);
+        }
+        let descriptor = rmr + u32_at(&data, rmr + 24) as usize;
+        assert_eq!(u64_at(&data, descriptor), 0xEFF6_0000);
+        assert_eq!(u64_at(&data, descriptor + 8), 0x2_0000);
     }
 
     #[test]

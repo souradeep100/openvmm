@@ -451,6 +451,8 @@ impl PetriVmConfigOpenVmm {
                 name.to_string(),
                 PcieIommuConfig::Smmu {
                     accel: false,
+                    ats: false,
+                    ssid_bits: 0,
                     oas: openvmm_defs::config::SmmuOas::Auto,
                 },
             ));

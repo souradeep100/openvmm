@@ -35,7 +35,8 @@ impl ResourceId<PciDeviceHandleKind> for VfioDeviceHandle {
 /// The launcher opens the VFIO cdev file descriptor
 /// (e.g., `/dev/vfio/devices/vfio0`) and the iommufd file descriptor
 /// (`/dev/iommu`) and passes them here. The VMM binds the device to the
-/// iommufd instance and attaches an IOAS for DMA mapping.
+/// iommufd instance and attaches either an IOAS for DMA mapping or, when
+/// requested, a direct vIOMMU/vDEVICE/HWPT context.
 #[derive(MeshPayload)]
 pub struct VfioCdevDeviceHandle {
     /// PCI BDF address on the host (e.g., "0000:3f:7a.0").
@@ -47,6 +48,10 @@ pub struct VfioCdevDeviceHandle {
     /// The `--iommu` context ID this device belongs to. All devices
     /// sharing the same ID share a single IOAS (one set of page tables).
     pub iommu_id: String,
+    /// Use direct VIOMMU/VDEVICE/HWPT attach for this cdev.
+    pub direct_iommu: bool,
+    /// Enable the DIRECT HWPT ATS/PASID path for this device.
+    pub direct_ats_pasid: bool,
     /// Per-BAR passthrough flags. When `bar_pt[i]` is true, the virtual
     /// BAR is pre-programmed with the physical BAR address (GPA = HPA).
     pub bar_pt: [bool; 6],

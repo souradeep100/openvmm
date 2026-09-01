@@ -610,6 +610,12 @@ impl Partition for KvmPartition {
         Some(self.irqfd_state.clone())
     }
 
+    fn direct_iommu_vm_fd(&self) -> Option<std::os::fd::BorrowedFd<'_>> {
+        // KVM exposes the VM as a real fd, so direct iommufd can pass it to
+        // the kernel without backend-specific translation.
+        Some(self.inner.kvm.vm_fd())
+    }
+
     fn caps(&self) -> &virt::PartitionCapabilities {
         &self.inner.caps
     }
