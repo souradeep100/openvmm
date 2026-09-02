@@ -218,8 +218,24 @@ pub struct IommuHwptArmSmmuv3 {
     pub ste: [u64; 2],
 }
 
-/// Enable ATS/PASID handling for a direct-attached device.
-pub const IOMMU_HWPT_DIRECT_FLAG_ATS_PASID: u32 = 1 << 0;
+/// Enable PASID/SVA handling for a direct-attached device.
+pub const IOMMU_HWPT_DIRECT_FLAG_PASID: u32 = 1 << 0;
+/// Enable endpoint ATS/ATC handling for a direct-attached device.
+///
+/// This flag requires [`IOMMU_HWPT_DIRECT_FLAG_PASID`].
+pub const IOMMU_HWPT_DIRECT_FLAG_ATS: u32 = 1 << 1;
+
+fn validate_direct_hwpt_flags(flags: u32) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        flags & !(IOMMU_HWPT_DIRECT_FLAG_PASID | IOMMU_HWPT_DIRECT_FLAG_ATS) == 0,
+        "unsupported direct HWPT flags {flags:#x}"
+    );
+    anyhow::ensure!(
+        flags & IOMMU_HWPT_DIRECT_FLAG_ATS == 0 || flags & IOMMU_HWPT_DIRECT_FLAG_PASID != 0,
+        "direct HWPT ATS requires PASID"
+    );
+    Ok(())
+}
 
 /// Direct attach HWPT data.
 #[repr(C)]
@@ -575,10 +591,7 @@ impl IommufdCtx {
     ///
     /// `pt_id` is the DIRECT vIOMMU ID. Returns the kernel-assigned HWPT ID.
     pub fn hwpt_alloc_direct(&self, dev_id: u32, pt_id: u32, flags: u32) -> anyhow::Result<u32> {
-        anyhow::ensure!(
-            flags & !IOMMU_HWPT_DIRECT_FLAG_ATS_PASID == 0,
-            "unsupported direct HWPT flags {flags:#x}"
-        );
+        validate_direct_hwpt_flags(flags)?;
         // This stack struct mirrors the C UAPI payload. `#[repr(C)]` on the
         // type is what makes the field order and padding match the kernel.
         let data = IommuHwptDirect {
@@ -859,5 +872,20 @@ impl AsFd for IommufdCtx {
 impl AsRawFd for IommufdCtx {
     fn as_raw_fd(&self) -> RawFd {
         self.file.as_raw_fd()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn direct_hwpt_flag_validation() {
+        validate_direct_hwpt_flags(0).unwrap();
+        validate_direct_hwpt_flags(IOMMU_HWPT_DIRECT_FLAG_PASID).unwrap();
+        validate_direct_hwpt_flags(IOMMU_HWPT_DIRECT_FLAG_PASID | IOMMU_HWPT_DIRECT_FLAG_ATS)
+            .unwrap();
+        assert!(validate_direct_hwpt_flags(IOMMU_HWPT_DIRECT_FLAG_ATS).is_err());
+        assert!(validate_direct_hwpt_flags(1 << 31).is_err());
     }
 }

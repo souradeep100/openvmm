@@ -50,8 +50,10 @@ pub struct VfioCdevDeviceHandle {
     pub iommu_id: String,
     /// Use direct VIOMMU/VDEVICE/HWPT attach for this cdev.
     pub direct_iommu: bool,
-    /// Enable the DIRECT HWPT ATS/PASID path for this device.
-    pub direct_ats_pasid: bool,
+    /// Enable the DIRECT HWPT PASID/SVA path for this device.
+    pub direct_pasid: bool,
+    /// Enable the additional DIRECT HWPT endpoint ATS/ATC path for this device.
+    pub direct_ats: bool,
     /// Per-BAR passthrough flags. When `bar_pt[i]` is true, the virtual
     /// BAR is pre-programmed with the physical BAR address (GPA = HPA).
     pub bar_pt: [bool; 6],

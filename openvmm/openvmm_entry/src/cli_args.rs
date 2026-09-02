@@ -1262,8 +1262,11 @@ kernel with the direct iommufd UAPI.
 
 Examples:
     --iommu id=iommu0 --direct-iommu iommu=iommu0 \
-      --smmu rc=rc0,accel,ats,ssid-bits=14 \
+      --smmu rc=rc0,accel,ssid-bits=14 \
       --vfio host=0008:06:00.0,port=rp0,iommu=iommu0
+
+Add `ats` to the SMMU configuration only when endpoint ATS is explicitly
+required and has passed the platform safety gate.
 
 Syntax: iommu=<name>
 "#)]
@@ -3657,7 +3660,7 @@ pub struct SmmuCli {
     pub rc_name: String,
     /// Use the Hyper-V-owned guest SMMUv3 path.
     pub accel: bool,
-    /// Advertise and enable ATS/PASID for DIRECT devices.
+    /// Advertise and enable endpoint ATS for DIRECT devices.
     pub ats: bool,
     /// SMMUv3 substream/PASID width.
     pub ssid_bits: u8,
@@ -3732,6 +3735,10 @@ impl FromStr for SmmuCli {
 
         let rc_name = rc_name.context("--smmu: 'rc=' is required")?;
         let ssid_bits = ssid_bits.unwrap_or(0);
+        anyhow::ensure!(
+            ssid_bits == 0 || accel,
+            "--smmu: nonzero ssid-bits requires accel"
+        );
         anyhow::ensure!(!ats || accel, "--smmu: ats requires accel");
         anyhow::ensure!(
             !ats || ssid_bits != 0,
@@ -5903,7 +5910,13 @@ mod tests {
         assert_eq!(s.ssid_bits, 0);
         assert!(matches!(s.oas, SmmuOasCli::Auto));
 
-        // ATS/PASID is explicit and requires accelerated mode plus SSID width.
+        // PASID/SVA-only mode uses an SSID width without ATS.
+        let s = SmmuCli::from_str("rc=pcie0,accel,ssid-bits=14").unwrap();
+        assert!(s.accel);
+        assert!(!s.ats);
+        assert_eq!(s.ssid_bits, 14);
+
+        // ATS is an additional explicit opt-in.
         let s = SmmuCli::from_str("rc=pcie0,accel,ats,ssid-bits=14").unwrap();
         assert!(s.accel);
         assert!(s.ats);
@@ -5936,7 +5949,8 @@ mod tests {
         // Non-numeric oas value.
         assert!(SmmuCli::from_str("rc=pcie0,oas=big").is_err());
 
-        // Invalid ATS/PASID combinations.
+        // Invalid PASID/ATS combinations.
+        assert!(SmmuCli::from_str("rc=pcie0,ssid-bits=14").is_err());
         assert!(SmmuCli::from_str("rc=pcie0,ats,ssid-bits=14").is_err());
         assert!(SmmuCli::from_str("rc=pcie0,accel,ats").is_err());
         assert!(SmmuCli::from_str("rc=pcie0,accel,ats,ssid-bits=0").is_err());
