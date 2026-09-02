@@ -409,18 +409,6 @@ impl MshvPartitionInner {
     }
 }
 
-/// Computes the Hyper-V logical device ID for a direct-attached PCI device.
-///
-/// This matches the encoding the root partition's Hyper-V IOMMU driver uses
-/// for direct-attached devices, so that a device attached by the kernel can be
-/// named by the VMM in [`MshvPartition::set_device_virtual_iommu`].
-pub fn logical_device_id(segment: u16, bus: u8, device: u8, function: u8) -> u64 {
-    ((segment as u64) << 16)
-        | ((bus as u64) << 8)
-        | (((device & 0x1f) as u64) << 3)
-        | ((function & 0x7) as u64)
-}
-
 /// Virtual IOMMU support for assigned-device passthrough.
 ///
 /// On ARM64 the hypervisor emulates the guest-visible SMMUv3: it intercepts
