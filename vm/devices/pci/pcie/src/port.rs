@@ -66,6 +66,10 @@ pub struct PciePortSettings {
     /// extended capability is not present.
     pub acs_capabilities_supported: u16,
 
+    /// Maximum number of End-End TLP Prefixes this port can forward.
+    /// `None` means prefix forwarding is not advertised.
+    pub tlp_prefixing_supported: Option<u8>,
+
     /// Flex Bus Port capability bits used to advertise CXL support on ports.
     ///
     /// CXL DVSECs are added only when this is `Some` and either `cache_capable`
@@ -371,6 +375,11 @@ impl PcieDownstreamPort {
             PciExpressCapability::new(port_type, None).with_hotplug_support(slot_num)
         } else {
             PciExpressCapability::new(port_type, None)
+        };
+
+        let pcie_cap = match settings.tlp_prefixing_supported {
+            Some(max_prefixes) => pcie_cap.with_tlp_prefixing_supported(max_prefixes),
+            None => pcie_cap,
         };
 
         let extended_capabilities = if acs_supported != 0 {
@@ -940,6 +949,7 @@ mod tests {
             &msi_target,
             PciePortSettings {
                 acs_capabilities_supported: 0,
+                tlp_prefixing_supported: None,
                 cxl_flex_bus_port_capability: Some(
                     CxlFlexBusPortDvsecCapability::new().with_mem_capable(true),
                 ),
@@ -1542,6 +1552,7 @@ mod tests {
             &msi_target,
             PciePortSettings {
                 acs_capabilities_supported: 0,
+                tlp_prefixing_supported: None,
                 cxl_flex_bus_port_capability: Some(
                     CxlFlexBusPortDvsecCapability::new().with_mem_capable(true),
                 ),

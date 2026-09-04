@@ -52,7 +52,12 @@ pub struct UpstreamSwitchPort {
 
 impl UpstreamSwitchPort {
     /// Constructs a new [`UpstreamSwitchPort`] emulator.
-    pub fn new() -> Self {
+    pub fn new(tlp_prefixing_supported: Option<u8>) -> Self {
+        let pcie_cap = PciExpressCapability::new(DevicePortType::UpstreamSwitchPort, None);
+        let pcie_cap = match tlp_prefixing_supported {
+            Some(max_prefixes) => pcie_cap.with_tlp_prefixing_supported(max_prefixes),
+            None => pcie_cap,
+        };
         let cfg_space = ConfigSpaceType1Emulator::new(
             HardwareIds {
                 vendor_id: VENDOR_ID,
@@ -64,10 +69,7 @@ impl UpstreamSwitchPort {
                 type0_sub_vendor_id: 0,
                 type0_sub_system_id: 0,
             },
-            vec![Box::new(PciExpressCapability::new(
-                DevicePortType::UpstreamSwitchPort,
-                None,
-            ))],
+            vec![Box::new(pcie_cap)],
             vec![],
         );
         Self { cfg_space }
@@ -204,7 +206,12 @@ pub struct GenericPcieSwitch {
 impl GenericPcieSwitch {
     /// Constructs a new [`GenericPcieSwitch`] emulator.
     pub fn new(definition: GenericPcieSwitchDefinition) -> Result<Self, InvalidSwitchError> {
-        let upstream_port = UpstreamSwitchPort::new();
+        let tlp_prefixing_supported = definition
+            .downstream_ports
+            .iter()
+            .filter_map(|port| port.settings.tlp_prefixing_supported)
+            .max();
+        let upstream_port = UpstreamSwitchPort::new(tlp_prefixing_supported);
 
         // CXL is not supported on switch downstream ports (there is no CHBCR /
         // component-register infrastructure behind a switch).
@@ -697,7 +704,7 @@ mod tests {
 
     #[test]
     fn test_upstream_switch_port_creation() {
-        let port = UpstreamSwitchPort::new();
+        let port = UpstreamSwitchPort::new(None);
 
         // Verify that we can read the vendor/device ID from config space
         let vendor_device_id = port.cfg_space.read_u32(0x0);

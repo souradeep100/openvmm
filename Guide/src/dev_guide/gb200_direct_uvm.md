@@ -4,9 +4,9 @@ This path implements Design A: Hyper-V is the only owner of the guest-visible
 SMMUv3, while OpenVMM provides configuration, VFIO ownership, Hyper-V object
 creation and ACPI firmware.
 
-PASID/SVA and PCIe ATS are independent capabilities. A guest SSID width requests
-physical PASID support without enabling endpoint ATS. ATS is an additional,
-explicit opt-in and remains disabled by default.
+PASID/SVA and PCIe ATS are independent capabilities. A guest SSID width
+requests kernel-owned PASID support without enabling endpoint ATS. ATS is an
+additional, explicit opt-in and remains disabled by default.
 
 ## Command line
 
@@ -19,10 +19,17 @@ PASID/SVA-only is the pre-KDNET architecture and build-validation mode:
 ```
 
 This requests a PASID-capable DIRECT HWPT and advertises a 14-bit guest SSID
-space. It does not set the SMMUv3 IDR0 ATS bit, the IORT PCI root ATS attribute,
-or Hyper-V's physical ATS fields.
+space. The VFIO device hides its ATS capability in this mode so RM/GSP cannot
+select an ATS-addressed VA space while physical ATS is disabled.
 
-After ATS has passed the KDNET safety gate, it can be added explicitly:
+A nonzero `ssid-bits` value also makes the emulated PCIe root port advertise
+support for one End-End TLP Prefix. Linux propagates endpoint prefix support
+only when the upstream root port supports it. Without this capability,
+`pci_enable_pasid()` returns `EINVAL` before writing the endpoint PASID Control
+register, and the guest logs `Failed to enable PASID` even though the PASID
+extended capability is visible.
+
+Guest-triggered, kernel-mediated ATS can be added explicitly:
 
 ```text
 --iommu id=iommu0 --direct-iommu iommu=iommu0 \
@@ -46,8 +53,22 @@ without binding SVA; when ATS VA-space mode is enabled, its SVA path calls
 endpoint ATS, but GB200 runtime behavior remains unqualified until tested with
 the matching stack.
 
-Real ATS remains KDNET-gated because enabling it changes physical endpoint and
-IOMMU behavior. Do not add `ats` merely to obtain a guest PASID.
+With `ats`, the DIRECT kernel driver advertises ATS support but leaves both the
+physical-IOMMU and endpoint ATS state disabled. Guest `ATSCtl.Enable` starts at
+zero. When the guest driver changes it, VFIO synchronously invokes the kernel
+transaction:
+
+```text
+device held active
+  -> Hyper-V physical-IOMMU ATS
+  -> endpoint ATS through PCI core
+  -> guest readback observes Enable+
+```
+
+Disable runs in reverse order. OpenVMM keeps PASID kernel-owned, blocks guest
+reset paths while ATS may be active, and never writes ATS hardware directly.
+This matches the Windows EPCI/VPCI emulator: the visible ATS bit changes only
+after the backend transition succeeds and is cleared for reset replay.
 
 ## Identities
 
@@ -75,7 +96,8 @@ SRAT Generic Initiator and coherent-memory entries remain unchanged.
 Startup order is:
 
 1. create the DIRECT kernel vIOMMU, per-device vDEVICE and DIRECT HWPT;
-2. attach the VFIO cdev to the HWPT;
+2. attach the VFIO cdev to the HWPT, establishing kernel-owned PASID and
+   advertising optional ATS support with ATS initially disabled;
 3. assign guest PCI resources;
 4. create the Hyper-V virtual IOMMU and bind logical devices to identity vSIDs;
 5. build firmware.
@@ -85,6 +107,18 @@ Failures unwind completed Hyper-V bindings. Direct cleanup explicitly issues
 vDEVICE and the shared DIRECT vIOMMU after the last device. Failed detach or
 destroy operations retain their object IDs and error state for retry. The VM fd
 is held until the DIRECT manager is released.
+
+The guest ATS Control transition enables and disables endpoint and
+physical-IOMMU ATS in the Windows order. Final detach also disables active ATS,
+then PASID, before clearing logical capabilities. Failed teardown keeps the
+device quarantined instead of reopening raw config access. OpenVMM hides guest
+FLR while direct ATS is configured and disables ATS before
+`VFIO_DEVICE_RESET`, because physical ATS must not remain enabled while the
+endpoint is reset.
+
+Pause, reset, and final stop block and retry until ATS readback confirms the
+required state. A transition is not allowed to continue after an ATS control
+failure.
 
 Hyper-V currently has no virtual-IOMMU destroy hypercall. OpenVMM therefore
 unbinds every logical device and relies on partition teardown to reclaim the
@@ -103,5 +137,6 @@ The OpenVMM source mirrors the reviewed, not-yet-upstream DIRECT kernel UAPI:
 
 A kernel without that exact UAPI will compile OpenVMM but cannot run this path.
 This implementation is build/review only until the matching MSHV/iommufd stack
-is deployed and PASID-only behavior is qualified. ATS remains disabled until
-KDNET-backed validation is available.
+is deployed. Do not combine an ATS-enabled OpenVMM launch with an older kernel
+whose DIRECT ATS flag only advertises Hyper-V state and still permits raw guest
+ATS writes.

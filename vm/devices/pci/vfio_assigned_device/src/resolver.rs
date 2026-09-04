@@ -248,6 +248,11 @@ impl AsyncResolveResource<PciDeviceHandleKind, VfioCdevDeviceHandle> for VfioCde
             input.dma_target.msi_target(),
             memory_mapper,
             bar_pt,
+            crate::DirectCapabilityMediation {
+                direct: direct_iommu,
+                pasid: direct_pasid,
+                ats: direct_ats,
+            },
         )
         .await?;
 

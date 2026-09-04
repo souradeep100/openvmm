@@ -17,12 +17,17 @@ use pcie::PciePortSettings;
 /// Builds root-port PCIe settings from manifest flags.
 ///
 /// When CXL is enabled, emit a default Flex Bus capability advertising both
-/// cache and memory support.
-fn build_root_port_settings(rp_cfg: &PciePortConfig) -> PciePortSettings {
+/// cache and memory support. When PASID is enabled for the root complex,
+/// advertise one End-End TLP Prefix so guest Linux can enable endpoint PASID.
+fn build_root_port_settings(
+    rp_cfg: &PciePortConfig,
+    pasid_tlp_prefixing: bool,
+) -> PciePortSettings {
     PciePortSettings {
         acs_capabilities_supported: rp_cfg
             .acs_capabilities_supported
             .unwrap_or(DEFAULT_ACS_CAP_MASK),
+        tlp_prefixing_supported: pasid_tlp_prefixing.then_some(1),
         cxl_flex_bus_port_capability: rp_cfg.cxl.then_some(
             CxlFlexBusPortDvsecCapability::new()
                 .with_cache_capable(true)
@@ -32,8 +37,11 @@ fn build_root_port_settings(rp_cfg: &PciePortConfig) -> PciePortSettings {
 }
 
 /// Converts a manifest root-port entry into the runtime root-port definition.
-pub(super) fn build_root_port_definition(rp_cfg: &PciePortConfig) -> GenericPciePortDefinition {
-    let settings = build_root_port_settings(rp_cfg);
+pub(super) fn build_root_port_definition(
+    rp_cfg: &PciePortConfig,
+    pasid_tlp_prefixing: bool,
+) -> GenericPciePortDefinition {
+    let settings = build_root_port_settings(rp_cfg, pasid_tlp_prefixing);
 
     GenericPciePortDefinition {
         name: rp_cfg.name.as_str().into(),
@@ -124,5 +132,25 @@ mod tests {
     fn rejects_overlapping_ranges_on_same_segment() {
         let rcs = [rc("rc0", 0, 0, 4), rc("rc1", 0, 4, 8)];
         assert!(validate_pcie_root_complexes(&rcs).is_err());
+    }
+
+    #[test]
+    fn enables_tlp_prefixing_only_for_pasid_root_complexes() {
+        let port = PciePortConfig {
+            name: "rp0".to_string(),
+            devfn: None,
+            hotplug: false,
+            acs_capabilities_supported: None,
+            cxl: false,
+        };
+
+        assert_eq!(
+            build_root_port_settings(&port, false).tlp_prefixing_supported,
+            None
+        );
+        assert_eq!(
+            build_root_port_settings(&port, true).tlp_prefixing_supported,
+            Some(1)
+        );
     }
 }

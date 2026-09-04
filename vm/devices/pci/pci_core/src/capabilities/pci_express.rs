@@ -121,6 +121,23 @@ impl PciExpressCapability {
         }
     }
 
+    /// Advertises support for End-End TLP Prefix forwarding.
+    pub fn with_tlp_prefixing_supported(mut self, max_prefixes: u8) -> Self {
+        assert!((1..=4).contains(&max_prefixes));
+
+        // PCIe encodes four supported prefixes as zero.
+        let encoded_max = if max_prefixes == 4 {
+            0
+        } else {
+            u32::from(max_prefixes)
+        };
+        self.device_capabilities_2 = self
+            .device_capabilities_2
+            .with_end_end_tlp_prefix_supported(true)
+            .with_max_end_end_tlp_prefixes(encoded_max);
+        self
+    }
+
     fn handle_device_control_status_write(&mut self, val: ByteEnabledDwordWrite) {
         // Device Control (2 bytes) + Device Status (2 bytes)
         let mut state = self.state.lock();
@@ -843,6 +860,15 @@ mod tests {
             let ari_supported = device_caps_2 & 0x20 != 0;
             assert_eq!(ari_supported, expected, "unexpected ARI support for {name}");
         }
+    }
+
+    #[test]
+    fn test_tlp_prefixing_support_is_configurable() {
+        let cap = PciExpressCapability::new(DevicePortType::RootPort, None)
+            .with_tlp_prefixing_supported(1);
+
+        assert!(cap.device_capabilities_2.end_end_tlp_prefix_supported());
+        assert_eq!(cap.device_capabilities_2.max_end_end_tlp_prefixes(), 1);
     }
 
     #[test]

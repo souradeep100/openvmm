@@ -443,6 +443,7 @@ pub mod caps {
             VENDOR_SPECIFIC  = 0x09,
             PCI_EXPRESS      = 0x10,
             MSIX             = 0x11,
+            ADVANCED_FEATURES = 0x13,
         }
     }
 
@@ -458,8 +459,10 @@ pub mod caps {
             #![expect(missing_docs)] // self explanatory variants
             ACS   = 0x0D,
             ARI   = 0x0E,
+            ATS   = 0x0F,
             SRIOV = 0x10,
             REBAR = 0x15,
+            PASID = 0x1B,
             DVSEC = 0x23,
         }
     }
