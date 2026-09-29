@@ -2903,6 +2903,7 @@ impl InitializedVm {
             let partition = &partition;
             let mapper = &mapper;
             let port_info = &port_info;
+            let pcie_host_bridges = &pcie_host_bridges;
             let processor_topology = &processor_topology;
             let iommu_devices = &iommu_devices;
             async move {
@@ -2949,11 +2950,12 @@ impl InitializedVm {
                     if !has_direct_iommus {
                         None
                     } else {
-                        Some(
-                            partition.direct_iommu_vm_fd().context(
+                        Some(pci_resources::DirectIommuResolveContext {
+                            vm_fd: partition.direct_iommu_vm_fd().context(
                                 "--direct-iommu requires a hypervisor backend with a VM fd",
                             )?,
-                        )
+                            context_id: pcie_host_bridges[pi.rc_idx].index,
+                        })
                     },
                 )
                 .await?;
@@ -4367,7 +4369,7 @@ impl LoadedVm {
                                                 doorbell_registration: self.inner.partition.clone().into_doorbell_registration(Vtl::Vtl0),
                                                 shared_mem_mapper: Some(&mapper),
                                                 #[cfg(target_os = "linux")]
-                                                direct_iommu_vm_fd: None,
+                                                direct_iommu: None,
                                             },
                                         )
                                         .await
