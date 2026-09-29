@@ -166,25 +166,25 @@ impl PetriVmConfigOpenVmm {
             recv: None,
         }
         .into_resource();
-        self.config.pcie_devices.push(PcieDeviceConfig {
-            port_name: port_name.to_string(),
-            resource: GdmaDeviceHandle {
+        self.config.pcie_devices.push(PcieDeviceConfig::new(
+            port_name.to_string(),
+            GdmaDeviceHandle {
                 vports: vec![VportDefinition {
                     mac_address,
                     endpoint,
                 }],
             }
             .into_resource(),
-        });
+        ));
 
         self
     }
 
     /// Add a PCIe NVMe device to the VM using the NVMe emulator.
     pub fn with_pcie_nvme(mut self, port_name: &str, subsystem_id: Guid) -> Self {
-        self.config.pcie_devices.push(PcieDeviceConfig {
-            port_name: port_name.to_string(),
-            resource: NvmeControllerHandle {
+        self.config.pcie_devices.push(PcieDeviceConfig::new(
+            port_name.to_string(),
+            NvmeControllerHandle {
                 subsystem_id,
                 max_io_queues: 64,
                 msix_count: 64,
@@ -200,7 +200,7 @@ impl PetriVmConfigOpenVmm {
                 requests: None,
             }
             .into_resource(),
-        });
+        ));
 
         self
     }
@@ -217,9 +217,9 @@ impl PetriVmConfigOpenVmm {
         }
         .into_resource();
 
-        self.config.pcie_devices.push(PcieDeviceConfig {
-            port_name: port_name.to_string(),
-            resource: virtio_resources::VirtioPciDeviceHandle(
+        self.config.pcie_devices.push(PcieDeviceConfig::new(
+            port_name.to_string(),
+            virtio_resources::VirtioPciDeviceHandle(
                 virtio_resources::net::VirtioNetHandle {
                     max_queues: None,
                     mac_address,
@@ -228,7 +228,7 @@ impl PetriVmConfigOpenVmm {
                 .into_resource(),
             )
             .into_resource(),
-        });
+        ));
 
         self
     }
@@ -255,9 +255,9 @@ impl PetriVmConfigOpenVmm {
             recv: None,
         }
         .into_resource();
-        self.config.pcie_devices.push(PcieDeviceConfig {
-            port_name: port_name.to_string(),
-            resource: virtio_resources::VirtioPciDeviceHandle(
+        self.config.pcie_devices.push(PcieDeviceConfig::new(
+            port_name.to_string(),
+            virtio_resources::VirtioPciDeviceHandle(
                 virtio_resources::net::VirtioNetHandle {
                     max_queues: None,
                     mac_address,
@@ -266,7 +266,7 @@ impl PetriVmConfigOpenVmm {
                 .into_resource(),
             )
             .into_resource(),
-        });
+        ));
         self.resources.tcp_pipette_port = Some(port_recv);
         self
     }
