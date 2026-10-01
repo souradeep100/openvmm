@@ -547,7 +547,7 @@ For `--virtio-rng` and `--virtio-console`, use their separate PCIe port flags:
 
 # Direct aarch64 vIOMMU/VDEVICE/HWPT path:
 --iommu id=iommu0 --direct-iommu iommu=iommu0 \
-  --smmu rc=rc0,accel,ssid-bits=14 \
+  --smmu rc=rc0,accel \
   --vfio host=0000:01:00.0,port=rp0,iommu=iommu0
 
 # Pin BAR0 to its physical address for P2P DMA:
@@ -571,7 +571,7 @@ translation for DMA and MSI addresses. See
 The syntax is a comma-separated key/value list:
 
 ```sh
---smmu rc=<name>[,accel][,ats][,ssid-bits=N][,oas=auto|N]
+--smmu rc=<name>[,accel][,oas=auto|N]
 ```
 
 - `rc=<name>` (required): the PCIe root complex this SMMU covers.
@@ -579,12 +579,6 @@ The syntax is a comma-separated key/value list:
   `--iommu` devices retain the local emulated-SMMU/iommufd-nesting path.
   Devices using a `--direct-iommu` context instead use the Hyper-V-owned
   virtual SMMU path. Both modes require ACPI and the VFIO cdev path.
-- `ssid-bits=N` (optional, default `0`): advertise an SSID/PASID width from
-  1 through 20. A nonzero value requires `accel` and direct assignment, and
-  requests PASID ownership from the direct HWPT.
-- `ats` (optional, default off): advertise ATS and mediate guest ATS Control
-  transitions through VFIO. It requires `accel`, a nonzero `ssid-bits`, and a
-  VFIO device using a `--direct-iommu` context.
 - `oas=auto|N` (optional): the SMMU's output address size (OAS) in bits.
   `auto` (the default) starts at 48 bits, which covers typical configurations.
   Under `accel`, a device attached before VM start changes it to the physical
@@ -609,10 +603,6 @@ The syntax is a comma-separated key/value list:
 --smmu rc=rc0,accel --iommu id=iommu0 \
   --vfio host=0000:01:00.0,port=rp0,iommu=iommu0
 
-# Assign a direct PASID device and mediate guest-triggered ATS
---smmu rc=rc0,accel,ats,ssid-bits=14 \
-  --iommu id=iommu0 --direct-iommu iommu=iommu0 \
-  --vfio host=0008:06:00.0,port=rp0,iommu=iommu0
 ```
 
 ### AMD IOMMU (x86_64 only)

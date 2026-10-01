@@ -44,6 +44,10 @@ fn validate_backend_capabilities(
         direct || (!ats && ssid_bits == 0),
         "ATS and SSID/PASID support require direct assignment"
     );
+    anyhow::ensure!(
+        !ats && ssid_bits == 0,
+        "PASID and ATS require direct capability mediation"
+    );
     Ok(())
 }
 
@@ -371,9 +375,10 @@ mod tests {
     }
 
     #[test]
-    fn direct_backend_retains_cuda_ats_capabilities() {
-        validate_backend_capabilities(true, true, true, 14).unwrap();
-        validate_backend_capabilities(true, true, false, 14).unwrap();
+    fn direct_backend_defers_pasid_and_ats_capabilities() {
+        validate_backend_capabilities(true, true, false, 0).unwrap();
+        assert!(validate_backend_capabilities(true, true, true, 14).is_err());
+        assert!(validate_backend_capabilities(true, true, false, 14).is_err());
     }
 
     #[test]

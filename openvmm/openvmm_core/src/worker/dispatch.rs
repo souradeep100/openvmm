@@ -212,11 +212,6 @@ impl Manifest {
             pcie_root_complexes: config.pcie_root_complexes,
             pcie_ecam_below_4gb: config.pcie_ecam_below_4gb,
             pcie_devices: config.pcie_devices,
-            // Preserve direct-IOMMU names across restart.
-            #[cfg(target_os = "linux")]
-            direct_iommus: config.direct_iommus,
-            #[cfg(target_os = "linux")]
-            direct_assigned_devices: config.direct_assigned_devices,
             pcie_switches: config.pcie_switches,
             pcie_generic_initiators: config.pcie_generic_initiators,
             vpci_devices: config.vpci_devices,
@@ -245,6 +240,11 @@ impl Manifest {
             chipset_capabilities: config.chipset_capabilities,
             layout: config.layout,
             rtc_delta_milliseconds: config.rtc_delta_milliseconds,
+            // Appended to preserve existing MeshPayload field numbers.
+            #[cfg(target_os = "linux")]
+            direct_iommus: config.direct_iommus,
+            #[cfg(target_os = "linux")]
+            direct_assigned_devices: config.direct_assigned_devices,
         }
     }
 }
@@ -261,11 +261,6 @@ pub struct Manifest {
     pcie_root_complexes: Vec<PcieRootComplexConfig>,
     pcie_ecam_below_4gb: bool,
     pcie_devices: Vec<PcieDeviceConfig>,
-    /// Direct iommufd context names.
-    #[cfg(target_os = "linux")]
-    direct_iommus: Vec<String>,
-    #[cfg(target_os = "linux")]
-    direct_assigned_devices: Vec<openvmm_defs::config::DirectAssignedDeviceConfig>,
     pcie_switches: Vec<PcieSwitchConfig>,
     pcie_generic_initiators: Vec<openvmm_defs::config::PcieGenericInitiatorConfig>,
     vpci_devices: Vec<VpciDeviceConfig>,
@@ -294,6 +289,12 @@ pub struct Manifest {
     chipset_capabilities: VmChipsetCapabilities,
     layout: vmm_core_defs::LayoutConfig,
     rtc_delta_milliseconds: i64,
+    /// Direct iommufd context names. Appended for MeshPayload compatibility.
+    #[cfg(target_os = "linux")]
+    direct_iommus: Vec<String>,
+    /// Direct-assigned VFIO identities. Appended for MeshPayload compatibility.
+    #[cfg(target_os = "linux")]
+    direct_assigned_devices: Vec<openvmm_defs::config::DirectAssignedDeviceConfig>,
 }
 
 #[derive(Protobuf, SavedStateRoot)]
@@ -2677,8 +2678,13 @@ impl InitializedVm {
         // When active, PCIe devices on the covered root complexes get
         // translating GuestMemory and SignalMsi wrappers that route DMA
         // and MSI writes through the emulated SMMUv3.
-        #[cfg(guest_arch = "aarch64")]
-        let smmu_devices = {
+        #[cfg(all(guest_arch = "aarch64", target_os = "linux"))]
+        let direct_iommu_rc_indices = {
+            let direct_ports: std::collections::HashSet<&str> = cfg
+                .direct_assigned_devices
+                .iter()
+                .map(|device| device.port_name.as_str())
+                .collect();
             let direct_iommu_rc_indices = cfg
                 .direct_assigned_devices
                 .iter()
@@ -2698,6 +2704,38 @@ impl InitializedVm {
                     Ok(bridge.index)
                 })
                 .collect::<anyhow::Result<Vec<_>>>()?;
+            for device in &cfg.pcie_devices {
+                if !matches!(device.resource.id(), "vfio" | "vfio-cdev") {
+                    continue;
+                }
+                let port = port_info.get(device.port_name.as_str()).with_context(|| {
+                    format!(
+                        "assigned PCIe device references unknown port {}",
+                        device.port_name
+                    )
+                })?;
+                let rc_index = pcie_host_bridges
+                    .get(port.rc_idx)
+                    .with_context(|| {
+                        format!(
+                            "assigned PCIe device on port {} references invalid root complex index {}",
+                            device.port_name, port.rc_idx
+                        )
+                    })?
+                    .index;
+                anyhow::ensure!(
+                    !direct_iommu_rc_indices.contains(&rc_index)
+                        || direct_ports.contains(device.port_name.as_str()),
+                    "root complex {rc_index} cannot mix direct and non-direct VFIO devices"
+                );
+            }
+            direct_iommu_rc_indices
+        };
+        #[cfg(all(guest_arch = "aarch64", not(target_os = "linux")))]
+        let direct_iommu_rc_indices = Vec::new();
+
+        #[cfg(guest_arch = "aarch64")]
+        let smmu_devices = {
             let acpi_available = match &cfg.load_mode {
                 LoadMode::Linux {
                     boot_mode: openvmm_defs::config::LinuxDirectBootMode::DeviceTree,
@@ -2828,7 +2866,7 @@ impl InitializedVm {
         // IOVAs using the port's assigned bus range and remap MSIs using
         // the requester ID supplied by the PCI MSI path.
 
-        #[cfg(guest_arch = "aarch64")]
+        #[cfg(all(guest_arch = "aarch64", target_os = "linux"))]
         let virt_iommu_bindings: Vec<VirtIommuBinding> = {
             let virt_iommus: &[smmu_wiring::VirtIommuSetup] = match &iommu_devices {
                 IommuDevices::Smmu(devices) => &devices.virt_iommus,
@@ -2851,6 +2889,8 @@ impl InitializedVm {
                 })
                 .collect()
         };
+        #[cfg(all(guest_arch = "aarch64", not(target_os = "linux")))]
+        let virt_iommu_bindings = Vec::new();
 
         #[cfg(target_os = "linux")]
         let has_direct_iommus = !cfg.direct_iommus.is_empty();

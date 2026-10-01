@@ -661,7 +661,7 @@ options:
 
     /// configure SMMUv3 IOMMU for an aarch64 PCIe root complex (repeatable).
     ///
-    /// Syntax: `rc=<name>[,accel][,ats][,ssid-bits=N][,oas=auto|N]`.
+    /// Syntax: `rc=<name>[,accel][,oas=auto|N]`.
     #[cfg(guest_arch = "aarch64")]
     #[clap(long, value_name = "SMMU_CONFIG")]
     pub smmu: Vec<SmmuCli>,
@@ -1421,11 +1421,8 @@ kernel with the direct iommufd UAPI.
 
 Examples:
     --iommu id=iommu0 --direct-iommu iommu=iommu0 \
-      --smmu rc=rc0,accel,ssid-bits=14 \
+      --smmu rc=rc0,accel \
       --vfio host=0008:06:00.0,port=rp0,iommu=iommu0
-
-Add `ats` only when endpoint ATS is explicitly required and has passed the
-platform safety gate.
 
 Syntax: iommu=<name>
 "#)]
@@ -3764,8 +3761,7 @@ impl FromStr for VfioDeviceCli {
 
 /// CLI configuration for an SMMUv3 instance.
 ///
-/// Syntax: `rc=<name>[,accel][,ats][,ssid-bits=N][,oas=auto|N]`.
-/// ATS is off and `ssid-bits` is zero by default.
+/// Syntax: `rc=<name>[,accel][,oas=auto|N]`.
 #[cfg(guest_arch = "aarch64")]
 #[derive(Clone, Debug)]
 pub struct SmmuCli {
@@ -3788,10 +3784,6 @@ struct SmmuArgs {
     rc_name: String,
     #[kv(flag)]
     accel: bool,
-    #[kv(flag)]
-    ats: bool,
-    #[kv(key = "ssid-bits", default)]
-    ssid_bits: u8,
     #[kv(default)]
     oas: SmmuOasCli,
 }
@@ -3802,24 +3794,11 @@ impl FromStr for SmmuCli {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let args: SmmuArgs = s.parse()?;
-        anyhow::ensure!(
-            args.ssid_bits <= 20,
-            "--smmu: ssid-bits must be between 0 and 20"
-        );
-        anyhow::ensure!(
-            args.ssid_bits == 0 || args.accel,
-            "--smmu: nonzero ssid-bits requires accel"
-        );
-        anyhow::ensure!(!args.ats || args.accel, "--smmu: ats requires accel");
-        anyhow::ensure!(
-            !args.ats || args.ssid_bits != 0,
-            "--smmu: ats requires nonzero ssid-bits"
-        );
         Ok(Self {
             rc_name: args.rc_name,
             accel: args.accel,
-            ats: args.ats,
-            ssid_bits: args.ssid_bits,
+            ats: false,
+            ssid_bits: 0,
             oas: args.oas,
         })
     }
@@ -6554,18 +6533,6 @@ mod tests {
         assert_eq!(s.ssid_bits, 0);
         assert!(matches!(s.oas, SmmuOasCli::Auto));
 
-        // PASID/SVA-only mode uses an SSID width without ATS.
-        let s = SmmuCli::from_str("rc=pcie0,accel,ssid-bits=14").unwrap();
-        assert!(s.accel);
-        assert!(!s.ats);
-        assert_eq!(s.ssid_bits, 14);
-
-        // ATS is an additional explicit opt-in.
-        let s = SmmuCli::from_str("rc=pcie0,accel,ats,ssid-bits=14").unwrap();
-        assert!(s.accel);
-        assert!(s.ats);
-        assert_eq!(s.ssid_bits, 14);
-
         // Explicit oas=auto.
         let s = SmmuCli::from_str("rc=pcie0,oas=auto").unwrap();
         assert!(matches!(s.oas, SmmuOasCli::Auto));
@@ -6593,7 +6560,7 @@ mod tests {
         // Non-numeric oas value.
         assert!(SmmuCli::from_str("rc=pcie0,oas=big").is_err());
 
-        // Invalid PASID/ATS combinations.
+        // PASID and ATS are introduced by the capability-mediation layer.
         assert!(SmmuCli::from_str("rc=pcie0,ssid-bits=14").is_err());
         assert!(SmmuCli::from_str("rc=pcie0,ats,ssid-bits=14").is_err());
         assert!(SmmuCli::from_str("rc=pcie0,accel,ats").is_err());
