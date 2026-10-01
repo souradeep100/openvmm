@@ -314,6 +314,7 @@ fn smbios_config_from_cli(
     })
 }
 
+#[cfg(all(target_os = "linux", guest_arch = "aarch64"))]
 fn root_complex_for_port(
     port_name: &str,
     root_ports: &[cli_args::PcieRootPortCli],
