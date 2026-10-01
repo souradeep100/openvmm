@@ -1530,6 +1530,12 @@ struct VsmmuAssociation {
 impl VsmmuAssociations {
     fn begin(&mut self, vsmmu: &Arc<smmu::SmmuSharedState>, iommu_id: &str) -> anyhow::Result<()> {
         self.0.retain(|entry| entry.vsmmu.strong_count() != 0);
+        anyhow::ensure!(
+            !self.0.iter().any(|entry| {
+                entry.iommu_id == iommu_id && entry.vsmmu.as_ptr() != Arc::as_ptr(vsmmu)
+            }),
+            "IOMMU context {iommu_id:?} is already associated with another SMMU"
+        );
         if let Some(entry) = self
             .0
             .iter_mut()
