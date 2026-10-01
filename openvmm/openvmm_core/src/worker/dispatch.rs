@@ -2679,6 +2679,25 @@ impl InitializedVm {
         // and MSI writes through the emulated SMMUv3.
         #[cfg(guest_arch = "aarch64")]
         let smmu_devices = {
+            let direct_iommu_rc_indices = cfg
+                .direct_assigned_devices
+                .iter()
+                .map(|device| {
+                    let port = port_info.get(device.port_name.as_str()).with_context(|| {
+                        format!(
+                            "direct assigned device {} references unknown PCIe port {}",
+                            device.host_pci_id, device.port_name
+                        )
+                    })?;
+                    let bridge = pcie_host_bridges.get(port.rc_idx).with_context(|| {
+                        format!(
+                            "direct assigned device {} references invalid root complex index {}",
+                            device.host_pci_id, port.rc_idx
+                        )
+                    })?;
+                    Ok(bridge.index)
+                })
+                .collect::<anyhow::Result<Vec<_>>>()?;
             let acpi_available = match &cfg.load_mode {
                 LoadMode::Linux {
                     boot_mode: openvmm_defs::config::LinuxDirectBootMode::DeviceTree,
@@ -2701,6 +2720,7 @@ impl InitializedVm {
                     &chipset_builder,
                     &gm,
                     acpi_available,
+                    &direct_iommu_rc_indices,
                 )?,
                 _ => smmu_wiring::SmmuDevicesResult::default(),
             }
@@ -3412,9 +3432,9 @@ impl InitializedVm {
             // Final bus numbers determine the guest StreamIDs.
             #[cfg(guest_arch = "aarch64")]
             this.setup_virtual_iommus()?;
-            if let Err(error) = this.inner.load_firmware(false).await {
-                #[cfg(guest_arch = "aarch64")]
-                {
+            #[cfg(guest_arch = "aarch64")]
+            {
+                if let Err(error) = this.inner.load_firmware(false).await {
                     return match this.unbind_virtual_iommu_bindings() {
                         Ok(()) => Err(error.context("firmware load failed after vIOMMU setup")),
                         Err(rollback) => Err(error.context(format!(
@@ -3422,9 +3442,9 @@ impl InitializedVm {
                         ))),
                     };
                 }
-                #[cfg(not(guest_arch = "aarch64"))]
-                return Err(error);
             }
+            #[cfg(not(guest_arch = "aarch64"))]
+            this.inner.load_firmware(false).await?;
         }
 
         Ok(this)
@@ -3984,7 +4004,7 @@ impl LoadedVm {
                     "bound DIRECT device to Hyper-V virtual IOMMU"
                 );
             }
-            return Ok(());
+            Ok(())
         }
 
         #[cfg(not(all(target_os = "linux", feature = "virt_mshv")))]

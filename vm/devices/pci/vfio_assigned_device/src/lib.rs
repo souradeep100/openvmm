@@ -54,6 +54,8 @@ use vmcore::save_restore::SaveError;
 use vmcore::save_restore::SaveRestore;
 use vmcore::save_restore::SavedStateNotSupported;
 
+const SRIOV_CAPABILITY_SIZE: u16 = 0x40;
+
 /// VFIO BAR region information (offset and size within the device fd).
 #[derive(Debug, Clone, Copy, Inspect)]
 struct VfioBarInfo {
@@ -302,6 +304,8 @@ pub(crate) struct VfioAssignedPciDevice {
         with = "|m| inspect::iter_by_key(m.iter().map(|(k, v)| (format!(\"{k:#06x}\"), v)))"
     )]
     config_patches: BTreeMap<u16, ConfigPatch>,
+    #[inspect(with = "|r| r.as_ref().map(|r| format!(\"{:#x}-{:#x}\", r.start, r.end))")]
+    managed_sriov_range: Option<Range<u16>>,
 
     /// Synthetic PASID capability exposed for an accelerated IOMMUFD device.
     synthetic_pasid: Option<SyntheticPasidCapability>,
@@ -535,6 +539,7 @@ impl VfioAssignedPciDevice {
         let pcie_flr_control_offset = caps.pcie_flr_control_offset;
         let af_flr_control_offset = caps.af_flr_control_offset;
         let mut config_patches = caps.config_patches;
+        let managed_sriov_range = caps.managed_sriov_range;
         let synthetic_pasid = synthesize_pasid_capability(
             &vfio_device,
             &mut config_patches,
@@ -697,6 +702,7 @@ impl VfioAssignedPciDevice {
             supports_reset,
             bar_direct_maps,
             config_patches,
+            managed_sriov_range,
             synthetic_pasid,
             accel_stream,
             binding,
@@ -1119,6 +1125,7 @@ struct DiscoveredCapabilities {
     af_flr_control_offset: Option<u16>,
     /// Config space patch table for filtering capabilities from the guest.
     config_patches: BTreeMap<u16, ConfigPatch>,
+    managed_sriov_range: Option<Range<u16>>,
     /// Last capability in the visible extended-capability chain.
     last_ext_cap_offset: Option<u16>,
     /// Existing PASID capability offset, if VFIO exposes one in the future.
@@ -1144,6 +1151,7 @@ fn discover_capabilities(
         pcie_flr_control_offset: None,
         af_flr_control_offset: None,
         config_patches: BTreeMap::new(),
+        managed_sriov_range: None,
         last_ext_cap_offset: None,
         pasid_cap_offset: None,
     };
@@ -1299,6 +1307,15 @@ fn discover_capabilities(
         cap_ptr = next_ptr;
     }
 
+    let mut device_vendor = 0;
+    let is_gb200_pf = config
+        .read_config(
+            HeaderType00::DEVICE_VENDOR.0,
+            ByteEnabledDwordRead::with_all_bytes_enabled(&mut device_vendor),
+        )
+        .is_ok()
+        && device_vendor == 0x2941_10de;
+
     // --- Extended capability chain (offsets 0x100+) ---
 
     // Check if extended caps are reachable by probing the first offset.
@@ -1350,8 +1367,25 @@ fn discover_capabilities(
             );
 
             match cap_id {
-                // The GB200 PF driver must read the SR-IOV capability even
-                // though OpenVMM does not create or assign guest VFs.
+                caps::ExtendedCapabilityId::SRIOV => {
+                    result.managed_sriov_range =
+                        Some(offset..offset.saturating_add(SRIOV_CAPABILITY_SIZE));
+                    // The GB200 PF driver requires read-only SR-IOV discovery.
+                    if !is_gb200_pf {
+                        tracing::info!(
+                            ?cap_id,
+                            offset = format_args!("{offset:#x}"),
+                            "filtering extended capability from guest view"
+                        );
+                        result.config_patches.insert(
+                            offset,
+                            ConfigPatch {
+                                mask: 0x0000_FFFF,
+                                value: 0,
+                            },
+                        );
+                    }
+                }
                 caps::ExtendedCapabilityId::ARI | caps::ExtendedCapabilityId::REBAR => {
                     tracing::info!(
                         ?cap_id,
@@ -1542,6 +1576,7 @@ impl ChangeDeviceState for VfioAssignedPciDevice {
             ref mut msix,
             supports_reset,
             config_patches: _, // immutable — built at init
+            managed_sriov_range: _,
             ref mut synthetic_pasid,
             binding: _, // lifetime handle — no reset needed
             ref mut accel_stream,
@@ -1859,6 +1894,18 @@ impl PciConfigSpace for VfioAssignedPciDevice {
             {
                 let pasid = self.synthetic_pasid.as_mut().unwrap();
                 pasid.write(offset, value);
+                return IoResult::Ok;
+            }
+            _ if self
+                .managed_sriov_range
+                .as_ref()
+                .is_some_and(|range| range.contains(&offset)) =>
+            {
+                tracing::trace!(
+                    pci_id = self.pci_id.as_str(),
+                    offset = format_args!("{offset:#x}"),
+                    "ignored guest write to read-only SR-IOV capability"
+                );
                 return IoResult::Ok;
             }
             // All other registers: pass through to physical device.
@@ -2348,8 +2395,9 @@ mod tests {
     // --- Extended capability patch tests ---
 
     #[test]
-    fn extended_caps_sriov_visible() {
+    fn extended_caps_sriov_visible_for_gb200() {
         let mut cfg = MockConfigSpace::new(0x200);
+        cfg.write_u32(HeaderType00::DEVICE_VENDOR.0, 0x2941_10de);
         cfg.write_u32(0x34, 0x00);
         cfg.write_u32(0x100, MockConfigSpace::ext_cap_header(0x10, 1, 0));
 
@@ -2360,6 +2408,23 @@ mod tests {
             !caps.config_patches.contains_key(&0x100),
             "SR-IOV must remain visible for the GB200 PF driver"
         );
+        assert_eq!(caps.managed_sriov_range, Some(0x100..0x140));
+    }
+
+    #[test]
+    fn extended_caps_sriov_hidden_for_non_gb200() {
+        let mut cfg = MockConfigSpace::new(0x200);
+        cfg.write_u32(HeaderType00::DEVICE_VENDOR.0, 0x2942_10de);
+        cfg.write_u32(0x34, 0x00);
+        cfg.write_u32(0x100, MockConfigSpace::ext_cap_header(0x10, 1, 0));
+
+        let caps = discover_capabilities(&cfg, &MsiTarget::disconnected());
+
+        assert!(
+            caps.config_patches.contains_key(&0x100),
+            "SR-IOV must remain hidden for other VFIO devices"
+        );
+        assert_eq!(caps.managed_sriov_range, Some(0x100..0x140));
     }
 
     #[test]

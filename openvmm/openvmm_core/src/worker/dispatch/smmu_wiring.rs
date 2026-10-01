@@ -22,12 +22,29 @@ enum SmmuBackend {
     HyperV,
 }
 
-fn smmu_backend(accel: bool) -> SmmuBackend {
-    if accel {
+fn smmu_backend(accel: bool, direct: bool) -> SmmuBackend {
+    if accel && direct {
         SmmuBackend::HyperV
     } else {
         SmmuBackend::Local
     }
+}
+
+fn validate_backend_capabilities(
+    accel: bool,
+    direct: bool,
+    ats: bool,
+    ssid_bits: u8,
+) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        !direct || accel,
+        "direct assignment requires accelerated translation"
+    );
+    anyhow::ensure!(
+        direct || (!ats && ssid_bits == 0),
+        "ATS and SSID/PASID support require direct assignment"
+    );
+    Ok(())
 }
 
 /// Default advertised OAS (in bits) for an `oas=auto` SMMU.
@@ -167,6 +184,7 @@ pub(super) fn setup_smmu(
     chipset_builder: &ChipsetBuilder<'_>,
     gm: &GuestMemory,
     acpi_available: bool,
+    direct_iommu_rc_indices: &[u32],
 ) -> anyhow::Result<SmmuDevicesResult> {
     // Instantiate SMMU chipset devices.
     let mut shared_states: Vec<Option<Arc<smmu::SmmuSharedState>>> =
@@ -190,11 +208,15 @@ pub(super) fn setup_smmu(
     let mut virt_iommus = Vec::new();
 
     for ((rc_pos, rc, accel, ats, ssid_bits, oas), smmu) in smmu_rcs.zip(&resolved.instances) {
+        let rc_index = pcie_host_bridges[rc_pos].index;
+        let direct = direct_iommu_rc_indices.contains(&rc_index);
         anyhow::ensure!(
             !accel || acpi_available,
             "SMMU on root complex {}: accelerated translation requires ACPI",
             rc.name
         );
+        validate_backend_capabilities(accel, direct, ats, ssid_bits)
+            .with_context(|| format!("SMMU on root complex {}", rc.name))?;
 
         let oas_bits = match oas {
             openvmm_defs::config::SmmuOas::Auto => DEFAULT_AUTO_OAS_BITS,
@@ -209,13 +231,13 @@ pub(super) fn setup_smmu(
             }
         };
 
-        if smmu_backend(accel) == SmmuBackend::HyperV {
+        if smmu_backend(accel, direct) == SmmuBackend::HyperV {
             virt_iommus.push(VirtIommuSetup {
                 virt_iommu_id: (virt_iommus.len() + 1) as u32,
                 base_gpa_page: smmu.base >> 12,
                 evtq_intid: smmu.evtq_intid,
                 gerr_intid: smmu.gerr_intid,
-                rc_index: pcie_host_bridges[rc_pos].index,
+                rc_index,
                 ats,
                 ssid_bits,
                 oas_bits,
@@ -224,13 +246,13 @@ pub(super) fn setup_smmu(
                 reserved_iova_ranges(true, resolved.device_assignment_msi_iova_range)
                     .with_context(|| format!("SMMU on root complex {}", rc.name))?;
             configs.push(vmm_core::acpi_builder::AcpiSmmuConfig {
-                rc_index: pcie_host_bridges[rc_pos].index,
+                rc_index,
                 segment: pcie_host_bridges[rc_pos].segment,
                 base: smmu.base,
                 event_gsiv: smmu.evtq_intid,
                 gerr_gsiv: smmu.gerr_intid,
                 reserved_iova_ranges,
-                ats_supported: ats,
+                ats_supported: false,
                 device_stream_ids: Vec::new(),
             });
             continue;
@@ -343,8 +365,23 @@ mod tests {
 
     #[test]
     fn accelerated_smmu_uses_hyperv_not_local_device() {
-        assert_eq!(smmu_backend(true), SmmuBackend::HyperV);
-        assert_eq!(smmu_backend(false), SmmuBackend::Local);
+        assert_eq!(smmu_backend(true, true), SmmuBackend::HyperV);
+        assert_eq!(smmu_backend(true, false), SmmuBackend::Local);
+        assert_eq!(smmu_backend(false, false), SmmuBackend::Local);
+    }
+
+    #[test]
+    fn direct_backend_retains_cuda_ats_capabilities() {
+        validate_backend_capabilities(true, true, true, 14).unwrap();
+        validate_backend_capabilities(true, true, false, 14).unwrap();
+    }
+
+    #[test]
+    fn local_backend_rejects_direct_only_capabilities() {
+        validate_backend_capabilities(true, false, false, 0).unwrap();
+        assert!(validate_backend_capabilities(true, false, true, 14).is_err());
+        assert!(validate_backend_capabilities(true, false, false, 14).is_err());
+        assert!(validate_backend_capabilities(false, true, false, 0).is_err());
     }
 
     #[test]
