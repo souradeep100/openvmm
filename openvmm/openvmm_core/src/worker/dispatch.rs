@@ -897,6 +897,7 @@ struct DynamicVpciDeviceEntry {
 }
 
 #[cfg(guest_arch = "aarch64")]
+#[cfg_attr(not(target_os = "linux"), expect(dead_code))]
 fn parse_host_pci_id(id: &str) -> anyhow::Result<(u16, u8, u8, u8)> {
     let (segment, rest) = id.split_once(':').context("missing segment")?;
     let (bus, rest) = rest.split_once(':').context("missing bus")?;
@@ -910,11 +911,13 @@ fn parse_host_pci_id(id: &str) -> anyhow::Result<(u16, u8, u8, u8)> {
 }
 
 #[cfg(guest_arch = "aarch64")]
+#[cfg_attr(all(not(target_os = "linux"), not(test)), expect(dead_code))]
 fn guest_requester_id(bus: u8, device: u8, function: u8) -> u32 {
     (u32::from(bus) << 8) | (u32::from(device & 0x1f) << 3) | u32::from(function & 0x7)
 }
 
 #[cfg(guest_arch = "aarch64")]
+#[cfg_attr(not(target_os = "linux"), expect(dead_code))]
 struct VirtIommuBinding {
     host_pci_id: String,
     bus_range: pci_core::bus_range::AssignedBusRange,
@@ -923,6 +926,7 @@ struct VirtIommuBinding {
 }
 
 #[cfg(guest_arch = "aarch64")]
+#[cfg_attr(all(not(target_os = "linux"), not(test)), expect(dead_code))]
 fn direct_virt_iommu<'a>(
     virt_iommus: &'a [smmu_wiring::VirtIommuSetup],
     rc_index: u32,
@@ -939,6 +943,7 @@ fn direct_virt_iommu<'a>(
 }
 
 #[cfg(guest_arch = "aarch64")]
+#[cfg_attr(not(target_os = "linux"), expect(dead_code))]
 struct ActiveVirtIommuBinding {
     host_pci_id: String,
     logical_device_id: u64,
@@ -949,6 +954,7 @@ struct ActiveVirtIommuBinding {
 
 /// Tracks bindings for teardown before device fds and the partition are dropped.
 #[cfg(guest_arch = "aarch64")]
+#[cfg_attr(not(target_os = "linux"), expect(dead_code))]
 struct VirtIommuLifecycle {
     partition: Arc<dyn HvlitePartition>,
     active: Vec<ActiveVirtIommuBinding>,
@@ -1084,6 +1090,7 @@ struct LoadedVmInner {
     #[cfg(guest_arch = "aarch64")]
     virt_iommus: Vec<smmu_wiring::VirtIommuSetup>,
     #[cfg(guest_arch = "aarch64")]
+    #[cfg_attr(not(target_os = "linux"), expect(dead_code))]
     virt_iommu_bindings: Vec<VirtIommuBinding>,
     /// IOAPIC PCIe Requester ID when x86 IOMMU interrupt remapping is active.
     /// For AMD this is threaded into IVRS at firmware-load time; for Intel
@@ -2930,6 +2937,7 @@ impl InitializedVm {
             let partition = &partition;
             let mapper = &mapper;
             let port_info = &port_info;
+            #[cfg(target_os = "linux")]
             let pcie_host_bridges = &pcie_host_bridges;
             let processor_topology = &processor_topology;
             let iommu_devices = &iommu_devices;
