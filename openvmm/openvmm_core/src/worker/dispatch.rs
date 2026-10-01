@@ -923,6 +923,22 @@ struct VirtIommuBinding {
 }
 
 #[cfg(guest_arch = "aarch64")]
+fn direct_virt_iommu<'a>(
+    virt_iommus: &'a [smmu_wiring::VirtIommuSetup],
+    rc_index: u32,
+    host_pci_id: &str,
+) -> anyhow::Result<&'a smmu_wiring::VirtIommuSetup> {
+    virt_iommus
+        .iter()
+        .find(|viommu| viommu.rc_index == rc_index)
+        .with_context(|| {
+            format!(
+                "direct device {host_pci_id} on root complex {rc_index} has no Hyper-V virtual IOMMU"
+            )
+        })
+}
+
+#[cfg(guest_arch = "aarch64")]
 struct ActiveVirtIommuBinding {
     host_pci_id: String,
     logical_device_id: u64,
@@ -2874,20 +2890,31 @@ impl InitializedVm {
             };
             cfg.direct_assigned_devices
                 .iter()
-                .filter_map(|device| {
-                    let port = port_info.get(device.port_name.as_str())?;
-                    let rc_index = pcie_host_bridges.get(port.rc_idx)?.index;
-                    let viommu = virt_iommus
-                        .iter()
-                        .find(|viommu| viommu.rc_index == rc_index)?;
-                    Some(VirtIommuBinding {
+                .map(|device| {
+                    let port = port_info.get(device.port_name.as_str()).with_context(|| {
+                        format!(
+                            "direct device {} references unknown port {}",
+                            device.host_pci_id, device.port_name
+                        )
+                    })?;
+                    let rc_index = pcie_host_bridges
+                        .get(port.rc_idx)
+                        .with_context(|| {
+                            format!(
+                                "direct device {} port {} references invalid root complex index {}",
+                                device.host_pci_id, device.port_name, port.rc_idx
+                            )
+                        })?
+                        .index;
+                    let viommu = direct_virt_iommu(virt_iommus, rc_index, &device.host_pci_id)?;
+                    Ok(VirtIommuBinding {
                         host_pci_id: device.host_pci_id.clone(),
                         bus_range: port.bus_range.clone(),
                         virt_iommu_id: viommu.virt_iommu_id,
                         rc_index,
                     })
                 })
-                .collect()
+                .collect::<anyhow::Result<Vec<_>>>()?
         };
         #[cfg(all(guest_arch = "aarch64", not(target_os = "linux")))]
         let virt_iommu_bindings = Vec::new();
@@ -4995,6 +5022,27 @@ mod gb200_identity_tests {
     #[test]
     fn guest_vsid_is_the_assigned_requester_id() {
         assert_eq!(guest_requester_id(1, 0, 0), 0x100);
+    }
+
+    #[test]
+    fn direct_device_requires_matching_virtual_iommu() {
+        let virt_iommus = [smmu_wiring::VirtIommuSetup {
+            virt_iommu_id: 1,
+            base_gpa_page: 0,
+            evtq_intid: 0,
+            gerr_intid: 0,
+            rc_index: 7,
+            ats: false,
+            ssid_bits: 0,
+            oas_bits: 48,
+        }];
+        assert_eq!(
+            direct_virt_iommu(&virt_iommus, 7, "0008:06:00.0")
+                .unwrap()
+                .virt_iommu_id,
+            1
+        );
+        assert!(direct_virt_iommu(&virt_iommus, 8, "0009:06:00.0").is_err());
         assert_eq!(guest_requester_id(0x7f, 0x1f, 7), 0x7fff);
     }
 }
