@@ -3531,6 +3531,8 @@ mod tests {
             assert_eq!(error.to_string(), "multiple devices use PCIe port 'custom'");
             mesh.shutdown().await;
         });
+    }
+
     #[cfg(guest_arch = "aarch64")]
     #[test]
     fn accelerated_smmu_requires_direct_vfio() {
