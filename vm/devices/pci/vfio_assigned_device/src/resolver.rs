@@ -120,16 +120,11 @@ impl AsyncResolveResource<PciDeviceHandleKind, VfioDeviceHandle> for VfioDeviceR
 }
 
 fn direct_hwpt_flags(pasid: bool, ats: bool) -> anyhow::Result<u32> {
-    anyhow::ensure!(!ats || pasid, "direct ATS requires PASID/SSID support");
-    Ok(if pasid {
-        vfio_sys::iommufd::IOMMU_HWPT_DIRECT_FLAG_PASID
-    } else {
-        0
-    } | if ats {
-        vfio_sys::iommufd::IOMMU_HWPT_DIRECT_FLAG_ATS
-    } else {
-        0
-    })
+    anyhow::ensure!(
+        !pasid && !ats,
+        "direct PASID and ATS require capability mediation"
+    );
+    Ok(0)
 }
 
 /// Resource resolver for [`VfioCdevDeviceHandle`] (cdev + iommufd path).
@@ -353,17 +348,10 @@ mod tests {
     }
 
     #[test]
-    fn direct_capabilities_map_to_exact_uapi_flags() {
+    fn direct_capabilities_are_deferred() {
         assert_eq!(direct_hwpt_flags(false, false).unwrap(), 0);
-        assert_eq!(
-            direct_hwpt_flags(true, false).unwrap(),
-            vfio_sys::iommufd::IOMMU_HWPT_DIRECT_FLAG_PASID
-        );
-        assert_eq!(
-            direct_hwpt_flags(true, true).unwrap(),
-            vfio_sys::iommufd::IOMMU_HWPT_DIRECT_FLAG_PASID
-                | vfio_sys::iommufd::IOMMU_HWPT_DIRECT_FLAG_ATS
-        );
+        assert!(direct_hwpt_flags(true, false).is_err());
+        assert!(direct_hwpt_flags(true, true).is_err());
         assert!(direct_hwpt_flags(false, true).is_err());
     }
 }
